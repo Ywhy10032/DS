@@ -53,6 +53,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     applications/app.c
     applications/motor.c
     applications/encoder.c
+    applications/pid.c
+    applications/grayscale.c
 
     # Add user sources here
 )

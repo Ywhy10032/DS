@@ -31,7 +31,7 @@
 
 /* 计数方向修正：轮子正转时读到负数，就把对应项改成 1 */
 #define ENCODER_LEFT_REVERSED       0
-#define ENCODER_RIGHT_REVERSED      0
+#define ENCODER_RIGHT_REVERSED      1
 
 typedef enum
 {
