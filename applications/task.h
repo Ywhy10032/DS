@@ -40,7 +40,7 @@
    轮子直径填错会导致减速点跑偏：填大了会提前减速(只是慢一点，无害)，
    填小了会来不及减速甚至冲过终点。务必先量准轮径再依赖它。 */
 #define TASK2_CREEP_ENABLE          1
-#define TASK2_CREEP_START_M         (TASK2_LAP_LENGTH_M - 0.4f)
+#define TASK2_CREEP_START_M         (TASK2_LAP_LENGTH_M - 0.15f)
 #define TASK2_CREEP_RPM             50.0f
 
 /* ---------------- 里程兜底停车 ----------------
