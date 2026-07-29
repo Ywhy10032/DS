@@ -45,15 +45,28 @@
 #define TRACK_BASE_RPM          150.0f
 
 /* 转向 PID。整定方法见 tracking.c 末尾 */
-#define TRACK_STEER_KP          1.2f
+#define TRACK_STEER_KP          3.0f
 #define TRACK_STEER_KI          0.0f
-#define TRACK_STEER_KD          0.05f
+#define TRACK_STEER_KD          0.30f
 
-/* 差速上限(rpm)。限制住转向环最多能让两轮差多少，防止过弯直接原地打转 */
-#define TRACK_STEER_LIMIT_RPM   60.0f
+/* 差速上限(rpm)。限制住转向环最多能让两轮差多少，防止过弯直接原地打转。
+   基准速度提高后这个值要同步加大，否则急弯的转向力度会不够 */
+#define TRACK_STEER_LIMIT_RPM   100.0f
 
-/* 单轮目标转速的上限，防止基准速度 + 差速超出电机能力 */
-#define TRACK_MAX_RPM           200.0f
+/* ---------------- 弯道减速 ----------------
+   偏差越大说明弯越急，按比例压低基准速度：直道全速、弯道自动慢下来。
+   这是高速循迹能过弯的关键 —— 任何转向力度都有物理极限，
+   速度到了一定程度就只能靠减速来换转向半径。 */
+#define TRACK_CURVE_SLOWDOWN    1.5f    /* 每 1mm 偏差降低多少 rpm */
+#define TRACK_MIN_RPM           70.0f   /* 减速下限，别慢到失去惯性 */
+
+/* 丢线时把偏差钉到这个值(阵列边缘之外)，让转向环给出最大修正 */
+#define TRACK_LOST_OFFSET_MM    60.0f
+
+/* 单轮目标转速的上限，防止基准速度 + 差速超出电机能力。
+   必须留够 TRACK_BASE_RPM + TRACK_STEER_LIMIT_RPM 的余量，
+   否则急弯时外轮会被削顶，转向能力在最需要的时候反而被限住 */
+#define TRACK_MAX_RPM           250.0f
 
 /* 连续丢线超过这个时间就停车，避免车失控冲出赛道 */
 #define TRACK_LOST_STOP_MS      1000

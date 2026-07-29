@@ -9,6 +9,8 @@
 #include "grayscale.h"
 #include "pid.h"
 
+#include <math.h>
+
 /* 8 路探头的安装坐标，下标 0~7 从左到右 */
 static const float s_position_mm[GRAY_CHANNEL_NUM] = TRACK_SENSOR_POSITIONS;
 
@@ -99,6 +101,8 @@ void Track_Update(void)
   uint8_t values[GRAY_CHANNEL_NUM];
   float   offset;
   float   steer;
+  float   base;
+  float   floor_rpm;
 
   /* ---------- 1. 读灰度 ---------- */
   /* I2C 偶发失败时沿用上一次的偏差，不让通讯抖动传进控制环 */
@@ -119,9 +123,13 @@ void Track_Update(void)
     }
     else
     {
-      /* 丢线：保持上一次的偏差不变。这样车会继续按丢线前的方向修正，
-         多数情况下能自己拐回线上；实在找不回来就靠下面的超时停车兜底 */
+      /* 丢线 = 线已经跑出探头阵列。把偏差钉到阵列边缘之外、方向沿用丢线前，
+         让转向环直接给出最大修正。
+         注意不能只是"保持上一次的偏差"：线是从边缘滑出去的，滑出瞬间那个
+         偏差往往还不到满量程，照着它修正力度远远不够，车会几乎直着冲出弯道 */
       s_lost = 1;
+      s_offset = (s_offset >= 0.0f) ? TRACK_LOST_OFFSET_MM : -TRACK_LOST_OFFSET_MM;
+
       if (s_lost_ticks < 0xFFFFU)
       {
         s_lost_ticks++;
@@ -143,8 +151,21 @@ void Track_Update(void)
      车头向右修正 —— 正好把线拉回中间 */
   steer = PID_Update(&s_steer_pid, 0.0f, s_offset);
 
-  s_target[0] = Track_ClampRpm(s_base_rpm - steer);
-  s_target[1] = Track_ClampRpm(s_base_rpm + steer);
+  /* ---------- 5. 弯道减速 ---------- */
+  /* 偏差越大弯越急，按比例压低基准速度。转向力度有物理上限，速度高到一定
+     程度就只能靠减速来换转向半径 —— 这是高速循迹能过弯的关键 */
+  base = s_base_rpm - TRACK_CURVE_SLOWDOWN * fabsf(s_offset);
+
+  /* 减速下限。注意要跟着 s_base_rpm 走：外部把基准设成 0(停车)时，
+     下限也必须是 0，否则这里反而会把车重新推起来 */
+  floor_rpm = (s_base_rpm < TRACK_MIN_RPM) ? s_base_rpm : TRACK_MIN_RPM;
+  if (base < floor_rpm)
+  {
+    base = floor_rpm;
+  }
+
+  s_target[0] = Track_ClampRpm(base - steer);
+  s_target[1] = Track_ClampRpm(base + steer);
 }
 
 void Track_GetTargets(float *left_rpm, float *right_rpm)
