@@ -56,6 +56,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     applications/pid.c
     applications/grayscale.c
     applications/tracking.c
+    applications/key.c
+    applications/task.c
 
     # Add user sources here
 )

@@ -21,6 +21,7 @@ static uint8_t  s_raw[GRAY_CHANNEL_NUM] = {0};
 static float    s_offset      = 0.0f;      /* 最近一次的有效偏差 */
 static uint8_t  s_lost        = 0;
 static uint16_t s_lost_ticks  = 0;
+static uint8_t  s_dark_count  = 0;         /* 有多少路探头看到黑色 */
 
 static float    s_base_rpm    = TRACK_BASE_RPM;
 static float    s_target[2]   = {0.0f, 0.0f};   /* [0]=左 [1]=右 */
@@ -39,8 +40,9 @@ static HAL_StatusTypeDef s_status = HAL_ERROR;  /* 最近一次灰度读取的�
   */
 static uint8_t Track_Centroid(const uint8_t *values, float *offset)
 {
-  float sum_weight   = 0.0f;
-  float sum_weighted = 0.0f;
+  float   sum_weight   = 0.0f;
+  float   sum_weighted = 0.0f;
+  uint8_t dark_count   = 0;
 
   for (uint8_t i = 0; i < GRAY_CHANNEL_NUM; i++)
   {
@@ -50,6 +52,11 @@ static uint8_t Track_Centroid(const uint8_t *values, float *offset)
     int32_t weight = (int32_t)values[i];
 #endif
 
+    if (weight >= TRACK_CROSS_WEIGHT_TH)
+    {
+      dark_count++;                 /* 顺手统计有多少路是黑的，用于横线判定 */
+    }
+
     if (weight < TRACK_WEIGHT_NOISE_TH)
     {
       weight = 0;
@@ -58,6 +65,8 @@ static uint8_t Track_Centroid(const uint8_t *values, float *offset)
     sum_weight   += (float)weight;
     sum_weighted += (float)weight * s_position_mm[i];
   }
+
+  s_dark_count = dark_count;
 
   if (sum_weight < (float)TRACK_LOST_TH)
   {
@@ -117,7 +126,8 @@ void Track_Update(void)
     /* ---------- 2. 加权质心 ---------- */
     if (Track_Centroid(values, &offset))
     {
-      s_offset     = offset;
+      /* 一阶低通，磨掉宽线造成的死区跳变(见 tracking.h 里 TRACK_OFFSET_LPF 的说明) */
+      s_offset    += TRACK_OFFSET_LPF * (offset - s_offset);
       s_lost       = 0;
       s_lost_ticks = 0;
     }
@@ -188,6 +198,18 @@ float Track_GetOffset(void)
 uint8_t Track_IsLost(void)
 {
   return s_lost;
+}
+
+uint8_t Track_IsCrossLine(void)
+{
+  /* 够多路同时黑，且车是对正的 —— 后一条用来把急弯的斜穿排除掉 */
+  return ((s_dark_count >= TRACK_CROSS_MIN_CH) &&
+          (fabsf(s_offset) <= TRACK_CROSS_MAX_OFFSET_MM));
+}
+
+uint8_t Track_GetDarkCount(void)
+{
+  return s_dark_count;
 }
 
 const uint8_t *Track_GetRaw(void)
