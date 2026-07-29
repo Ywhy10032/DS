@@ -18,13 +18,13 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "can.h"
 #include "spi.h"
+#include "tim.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "lcd_spi_200.h"
+#include "app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -88,22 +88,12 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_CAN1_Init();
   MX_SPI3_Init();
+  MX_TIM1_Init();
+  MX_TIM3_Init();
+  MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
-
-  /* ---------- LCD init ---------- */
-  SPI_LCD_Init();
-  LCD_SetDirection(Direction_V);        /* portrait 240x320 */
-  LCD_SetBackColor(LCD_BLACK);
-  LCD_SetColor(LCD_WHITE);
-  LCD_Clear();
-
-  /* ---------- Show "DS" centred on screen ---------- */
-  LCD_SetAsciiFont(&ASCII_Font32);      /* largest built-in ASCII font: 32x16 */
-  LCD_DisplayString((LCD_Width  - 2 * 16) / 2,      /* 2 chars wide */
-                    (LCD_Height - 32) / 2,
-                    "DS");
+  App_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -113,6 +103,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    App_Run();
   }
   /* USER CODE END 3 */
 }
@@ -138,10 +129,10 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 8;              /* 8MHz 晶振 -> PLL 输入 1MHz（必须 1~2MHz） */
-  RCC_OscInitStruct.PLL.PLLN = 336;            /* VCO = 1MHz * 336 = 336MHz */
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;  /* SYSCLK = 336/2 = 168MHz */
-  RCC_OscInitStruct.PLL.PLLQ = 7;              /* USB/SDIO 48MHz = 336/7 */
+  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLN = 336;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();

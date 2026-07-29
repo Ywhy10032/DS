@@ -49,12 +49,18 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     lcd_driver/lcd_spi_200.c
     lcd_driver/gb2312_font.c
 
+    # Application code
+    applications/app.c
+    applications/motor.c
+    applications/encoder.c
+
     # Add user sources here
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     lcd_driver
+    applications
 
     # Add user defined include paths
 )
@@ -64,6 +70,9 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 
     # Add user defined symbols
 )
+
+# newlib-nano 默认不带浮点 printf，LCD_DisplayDecimals() 依赖它显示小数
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -u _printf_float)
 
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
