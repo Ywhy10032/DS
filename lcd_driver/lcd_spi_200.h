@@ -40,6 +40,7 @@
 #define 	LCD_RED         0xFF0000    //	����ɫ
 #define 	LCD_CYAN        0x00FFFF    //	����ɫ
 #define 	LCD_MAGENTA     0xFF00FF    //	�Ϻ�ɫ
+
 #define 	LCD_YELLOW      0xFFFF00    //	��ɫ
 #define 	LCD_GREY        0x2C2C2C    //	��ɫ
 												

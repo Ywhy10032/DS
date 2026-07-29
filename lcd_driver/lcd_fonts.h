@@ -32,5 +32,7 @@ extern pFONT ASCII_Font20; 	// 2010 ×ÖÌו
 extern pFONT ASCII_Font16; 	// 1608 ×ÖÌו
 extern pFONT ASCII_Font12; 	// 1206 ×ÖÌו
 
+extern pFONT GB2312_Font24;   /* GB2312 full font 24x24 */
+
 #endif 
  

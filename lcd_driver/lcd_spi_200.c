@@ -694,18 +694,14 @@ void LCD_DisplayChinese(uint16_t x, uint16_t y, char *pText)
    uint8_t   disChar;	//��ģ��ֵ
 	uint16_t  Xaddress = 0; //ˮƽ����
 
-	while(1)
-	{		
-		// �Ա������еĺ��ֱ��룬���Զ�λ�ú�����ģ�ĵ�ַ		
-		if ( *(LCD_CHFonts->pTable + (i+1)*LCD_CHFonts->Sizes + 0)==*pText && *(LCD_CHFonts->pTable + (i+1)*LCD_CHFonts->Sizes + 1)==*(pText+1) )	
-		{   
-			addr=i;	// ��ģ��ַƫ��
-			break;
-		}				
-		i+=2;	// ÿ�������ַ�����ռ���ֽ�
-
-		if(i >= LCD_CHFonts->Table_Rows)	break;	// ��ģ�б�������Ӧ�ĺ���	
-	}	
+	/* full-font: locate glyph directly by GB2312 code (O(1) offset) */
+	{
+		uint8_t GBH = (uint8_t)pText[0];
+		uint8_t GBL = (uint8_t)pText[1];
+		if( GBH < 0xA1 || GBH > 0xF7 || GBL < 0xA1 || GBL > 0xFE )
+			return;
+		addr = (uint16_t)((GBH - 0xA1) * 94 + (GBL - 0xA1));
+	}
 	i=0;
 	for(index = 0; index <LCD_CHFonts->Sizes; index++)
 	{	
@@ -816,11 +812,11 @@ void  LCD_DisplayNumber( uint16_t x, uint16_t y, int32_t number, uint8_t len)
 
 	if( LCD.ShowNum_Mode == Fill_Zero)	// ����λ��0
 	{
-		sprintf( Number_Buffer , "%0.*d",len, number );	// �� number ת�����ַ�����������ʾ		
+		sprintf( Number_Buffer , "%0*ld",len, (long)number );	// �� number ת�����ַ�����������ʾ
 	}
 	else			// ����λ���ո�
 	{	
-		sprintf( Number_Buffer , "%*d",len, number );	// �� number ת�����ַ�����������ʾ		
+		sprintf( Number_Buffer , "%*ld",len, (long)number );	// �� number ת�����ַ�����������ʾ
 	}
 	
 	LCD_DisplayString( x, y,(char *)Number_Buffer) ;  // ��ת���õ����ַ�����ʾ����

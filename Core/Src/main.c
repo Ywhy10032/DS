@@ -24,7 +24,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "lcd_spi_200.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -92,6 +92,18 @@ int main(void)
   MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
 
+  /* ---------- LCD init ---------- */
+  SPI_LCD_Init();
+  LCD_SetDirection(Direction_V);        /* portrait 240x320 */
+  LCD_SetBackColor(LCD_BLACK);
+  LCD_SetColor(LCD_WHITE);
+  LCD_Clear();
+
+  /* ---------- Show "DS" centred on screen ---------- */
+  LCD_SetAsciiFont(&ASCII_Font32);      /* largest built-in ASCII font: 32x16 */
+  LCD_DisplayString((LCD_Width  - 2 * 16) / 2,      /* 2 chars wide */
+                    (LCD_Height - 32) / 2,
+                    "DS");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -122,15 +134,14 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 8;
-  RCC_OscInitStruct.PLL.PLLN = 168;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 8;              /* 8MHz 晶振 -> PLL 输入 1MHz（必须 1~2MHz） */
+  RCC_OscInitStruct.PLL.PLLN = 336;            /* VCO = 1MHz * 336 = 336MHz */
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;  /* SYSCLK = 336/2 = 168MHz */
+  RCC_OscInitStruct.PLL.PLLQ = 7;              /* USB/SDIO 48MHz = 336/7 */
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();

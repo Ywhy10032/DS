@@ -47,6 +47,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     lcd_driver/lcd_fonts.c
     lcd_driver/lcd_image.c
     lcd_driver/lcd_spi_200.c
+    lcd_driver/gb2312_font.c
 
     # Add user sources here
 )
