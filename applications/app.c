@@ -770,8 +770,9 @@ void App_Run(void)
   {
     s_outer_cnt = 0;
 
-    /* 灰度没通就不许跑，否则会拿着全 0 的数据一头冲出去 */
-    if (Task_IsRunning() && (s_gray_status == HAL_OK))
+    /* 灰度没通就不许跑，否则会拿着全 0 的数据一头冲出去。
+       静止任务(如任务三)也不能跑外环 —— 否则车会自己沿线开走 */
+    if (Task_IsRunning() && Task_UsesVehicle() && (s_gray_status == HAL_OK))
     {
       HAL_StatusTypeDef status;
 
@@ -784,6 +785,12 @@ void App_Run(void)
         s_gray_status = status;
         App_DrawStatus();
       }
+    }
+    else if (Task_IsRunning())
+    {
+      /* 静止任务：目标转速钉死为 0，速度环会主动把轮子按住不动 */
+      s_target[MOTOR_LEFT]  = 0.0f;
+      s_target[MOTOR_RIGHT] = 0.0f;
     }
 
     /* Task_Update 放在 Track_Update 之后，这样终点判定用的是本拍的新数据 */

@@ -59,6 +59,39 @@
 #define TASK2_DIST_STOP_ENABLE      1
 #define TASK2_DIST_STOP_M           (TASK_LAP_LENGTH_M + 0.30f)
 
+/* ================= 任务三参数 ================= */
+
+/**
+  * 任务三：小车【静止】，摆杆控制装置把钢球从中心 O 送到 +5cm 处，
+  *         到达后折返，再送到 -5cm 处并稳定在该点附近。
+  *         运行时间 ≤5s，±5cm 处的最大误差绝对值 ≤1cm。
+  *
+  * 全程车不动，只有摆杆工作 —— 见 Task_UsesVehicle()。
+  */
+
+/* 摆杆中心 O 的实测位置，以及 ±5cm 两个目标点 */
+#define TASK3_CENTER_CM         12.5f
+#define TASK3_PLUS_CM           (TASK3_CENTER_CM + 5.0f)   /* 17.5 */
+#define TASK3_MINUS_CM          (TASK3_CENTER_CM - 5.0f)   /*  7.5 */
+
+/* 判定"已到达"的阈值。指标是 ≤1cm，取 0.6 留 0.4cm 余量给视觉误差 */
+#define TASK3_ARRIVE_CM         0.6f
+
+/**
+  * 到达 +5cm 后【不停留】，立刻折返。
+  *
+  * 5 秒要走完 5cm + 10cm 共 15cm，平均 3cm/s，等球在 +5cm 处彻底停稳再折返
+  * 会白白吃掉一两秒。规则说的是"到达后折返"，判据是够到 ±5cm 附近即可，
+  * 所以一进容差圈就换目标 —— 控制器会立刻开始反向刹车，
+  * 球冲过 +5cm 的那点余量也在 1cm 容差内。
+  */
+
+/* 到达 -5cm 后要连续保持在容差内这么久，才算"稳定在该点附近" */
+#define TASK3_SETTLE_MS         500
+
+/* 时间兜底(ms)。正常 5s 内跑完，超时说明这一趟已经失败，只为防止一直跑下去 */
+#define TASK3_RUN_TIME_MS       15000
+
 /* ================= 任务四参数 ================= */
 
 /**
@@ -197,6 +230,14 @@ void Task_Update(void);
 Task_ID    Task_GetId(void);
 Task_State Task_GetState(void);
 uint8_t    Task_IsRunning(void);
+
+/**
+  * @brief  当前任务是否需要小车行驶
+  * @retval 0 表示这是个静止任务(如任务三：车不动、只有摆杆工作)
+  * @note   app.c 据此决定要不要跑循迹外环。少了这道判断，静止任务一启动
+  *         车就会自己沿线开走。
+  */
+uint8_t Task_UsesVehicle(void);
 
 /* 行驶总时间(ms)。运行中实时累加，完成或停止后定格 */
 uint32_t Task_GetElapsedMs(void);

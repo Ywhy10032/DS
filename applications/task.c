@@ -10,6 +10,9 @@
 #include "tracking.h"
 #include "encoder.h"
 #include "motor.h"
+#include "ball.h"
+
+#include <math.h>
 
 #define TASK_PI                 3.14159265f
 
@@ -27,6 +30,17 @@ static float    s_distance_m   = 0.0f;
 static float    s_ramp_rpm     = 0.0f;       /* 载球任务的速度斜坡当前值 */
 static uint32_t s_split_ms     = 0;          /* 到达评分点的用时，0 = 还没到 */
 static uint8_t  s_lap_done     = 0;          /* 任务五：整圈已跑完，正在减速 */
+
+/* 任务三的分段状态 */
+typedef enum
+{
+  TASK3_GO_PLUS = 0,      /* 从中心送到 +5cm */
+  TASK3_GO_MINUS,         /* 折返送到 -5cm */
+  TASK3_SETTLING          /* 已够到 -5cm，等它稳住 */
+} Task3_Phase;
+
+static Task3_Phase s_t3_phase    = TASK3_GO_PLUS;
+static uint32_t    s_t3_settle_ms = 0;       /* 进入容差圈的时刻 */
 
 /**
   * @brief  取左右轮的平均累计计数
@@ -92,8 +106,17 @@ static void Task_Start(void)
   /* 清掉上一轮残留的转向积分与微分历史，并把基准速度恢复成 TRACK_BASE_RPM */
   Track_Init();
 
+  /* 任务三：车不动，摆杆先把球送到 +5cm */
+  if (s_task == TASK_3)
+  {
+    s_t3_phase     = TASK3_GO_PLUS;
+    s_t3_settle_ms = HAL_GetTick();
+
+    Track_SetBaseSpeed(0.0f);
+    Ball_SetTarget(TASK3_PLUS_CM);
+  }
   /* 任务四：直线段慢速跑，转向调软、关掉弯道减速，起步交给斜坡 */
-  if (s_task == TASK_4)
+  else if (s_task == TASK_4)
   {
     Track_SetTunings(TASK4_STEER_KP, TASK4_STEER_KI, TASK4_STEER_KD);
     Track_SetCurveSlowdown(TASK4_CURVE_SLOWDOWN);
@@ -155,6 +178,59 @@ static void Task2_Run(void)
     Task_Finish(TASK_STATE_DONE);
   }
 #endif
+}
+
+/**
+  * @brief  任务三：小车静止，摆杆把球送到 +5cm、折返、再送到 -5cm 并稳住
+  * @note   到达 +5cm 时【不停留】直接换目标。5 秒要走完 15cm，等球在 +5cm
+  *         彻底停稳会白白吃掉一两秒；而规则只要求"够到 ±5cm 附近"，
+  *         一进容差圈就折返，控制器会立刻反向刹车，冲过的那点余量仍在 1cm 内。
+  */
+static void Task3_Run(void)
+{
+  float err = fabsf(Ball_GetPosCm() - Ball_GetTarget());
+
+  switch (s_t3_phase)
+  {
+    case TASK3_GO_PLUS:
+      if (err <= TASK3_ARRIVE_CM)
+      {
+        s_t3_phase = TASK3_GO_MINUS;
+        Ball_SetTarget(TASK3_MINUS_CM);
+      }
+      break;
+
+    case TASK3_GO_MINUS:
+      if (err <= TASK3_ARRIVE_CM)
+      {
+        s_t3_phase     = TASK3_SETTLING;
+        s_t3_settle_ms = HAL_GetTick();
+
+        /* 评分看的是"跑完全程"的用时，就是够到 -5cm 的这一刻 */
+        s_split_ms = s_elapsed_ms;
+      }
+      break;
+
+    default:    /* TASK3_SETTLING */
+      if (err > TASK3_ARRIVE_CM)
+      {
+        s_t3_settle_ms = HAL_GetTick();     /* 又跑出去了，重新计时 */
+      }
+      else if ((HAL_GetTick() - s_t3_settle_ms) >= TASK3_SETTLE_MS)
+      {
+        /* 稳住了。任务结束但【不关闭球杆闭环】—— 规则要求"稳定在该点附近"，
+           松手就散的话不算稳定 */
+        Task_Finish(TASK_STATE_DONE);
+        return;
+      }
+      break;
+  }
+
+  /* ---------- 时间兜底 ---------- */
+  if (s_elapsed_ms >= TASK3_RUN_TIME_MS)
+  {
+    Task_Finish(TASK_STATE_DONE);
+  }
 }
 
 /**
@@ -294,6 +370,10 @@ void Task_Update(void)
       Task2_Run();
       break;
 
+    case TASK_3:
+      Task3_Run();
+      break;
+
     case TASK_4:
       Task4_Run();
       break;
@@ -304,9 +384,8 @@ void Task_Update(void)
       TaskBallLap_Run();
       break;
 
-    /* 任务一/三待实现，目前只是普通巡线，按 KEY2 停 */
+    /* 任务一待实现，目前只是普通巡线，按 KEY2 停 */
     case TASK_1:
-    case TASK_3:
     default:
       Task_UpdateOdometry();
       break;
@@ -326,6 +405,12 @@ Task_State Task_GetState(void)
 uint8_t Task_IsRunning(void)
 {
   return (s_state == TASK_STATE_RUN);
+}
+
+uint8_t Task_UsesVehicle(void)
+{
+  /* 任务三是静止任务：车原地不动，全靠摆杆把球送到位 */
+  return (s_task != TASK_3);
 }
 
 uint32_t Task_GetElapsedMs(void)
