@@ -29,7 +29,8 @@ static int32_t  s_start_count  = 0;          /* 启动时的编码器基准 */
 static float    s_distance_m   = 0.0f;
 static float    s_ramp_rpm     = 0.0f;       /* 载球任务的速度斜坡当前值 */
 static uint32_t s_split_ms     = 0;          /* 到达评分点的用时，0 = 还没到 */
-static uint8_t  s_lap_done     = 0;          /* 任务五：整圈已跑完，正在减速 */
+static uint8_t  s_lap_done     = 0;          /* 任务五/六：整圈已跑完 */
+static uint32_t s_lap_done_ms  = 0;          /* 通过 A 的时刻，用来算滑行时长 */
 
 /* 任务三的分段状态 */
 typedef enum
@@ -67,11 +68,15 @@ static void Task_UpdateOdometry(void)
 
 /**
   * @brief  把基准速度按限定的加减速率往目标值靠
-  * @note   载球的任务(四、五)全靠它避免速度突变 —— 球感受到的是加速度，
+  * @note   载球的任务(四、五、六)全靠它避免速度突变 —— 球感受到的是加速度，
   *         斜坡率就是加速度的上限。加速和减速分开设，两端都不能有冲击。
+  *         顺带把本拍施加的加速度告诉球杆控制器做前馈 —— 球杆据此在球被
+  *         惯性拽走【之前】就把杆预先倾好，而不是等球动了再补救
   */
 static void Task_RampBase(float target_rpm, float accel, float decel)
 {
+  float applied = 0.0f;
+
   if (s_ramp_rpm < target_rpm)
   {
     s_ramp_rpm += accel * TRACK_PERIOD_S;
@@ -79,6 +84,7 @@ static void Task_RampBase(float target_rpm, float accel, float decel)
     {
       s_ramp_rpm = target_rpm;
     }
+    applied = accel;
   }
   else if (s_ramp_rpm > target_rpm)
   {
@@ -87,9 +93,27 @@ static void Task_RampBase(float target_rpm, float accel, float decel)
     {
       s_ramp_rpm = target_rpm;
     }
+    applied = -decel;
   }
 
   Track_SetBaseSpeed(s_ramp_rpm);
+  Ball_SetAccelFF(applied);
+}
+
+/**
+  * @brief  把过弯产生的向心加速度前馈给球杆
+  * @note   稳态过弯的向心加速度 a = v x omega，而 omega 正比于左右轮速差。
+  *         车速和轮速差都是我们自己下达的指令，因此完全已知 —— 和起步加速
+  *         一个道理，应该提前把杆倾好，而不是等球被甩出去再修。
+  *         比例常数(轮径、轮距、连杆传动比)全部并进 BALL_FF_CURVE_GAIN。
+  */
+static void Task_UpdateCurveFF(void)
+{
+  float left  = 0.0f;
+  float right = 0.0f;
+
+  Track_GetTargets(&left, &right);
+  Ball_SetCurveFF(0.5f * (left + right) * (right - left));
 }
 
 static void Task_Start(void)
@@ -101,10 +125,15 @@ static void Task_Start(void)
   s_ramp_rpm    = 0.0f;
   s_split_ms    = 0;
   s_lap_done    = 0;
+  s_lap_done_ms = 0;
   s_state       = TASK_STATE_RUN;
 
   /* 清掉上一轮残留的转向积分与微分历史，并把基准速度恢复成 TRACK_BASE_RPM */
   Track_Init();
+
+  /* 前馈归零。静止任务(任务三)不会调 Task_RampBase()，不清的话会一直
+     用着上一个任务残留的加速度值，把杆莫名其妙地倾着 */
+  Ball_SetAccelFF(0.0f);
 
   /* 任务三：车不动，摆杆先把球送到 +5cm */
   if (s_task == TASK_3)
@@ -257,6 +286,7 @@ static void Task4_Run(void)
   target_rpm = (s_distance_m >= TASK4_STOP_DIST_M) ? 0.0f : TASK4_BASE_RPM;
 
   Task_RampBase(target_rpm, TASK4_ACCEL_RPM_PER_S, TASK4_DECEL_RPM_PER_S);
+  Task_UpdateCurveFF();
 
   /* 斜坡走完(速度已经归零)才正式结束，避免最后再补一脚硬刹 */
   if ((target_rpm <= 0.0f) && (s_ramp_rpm <= 0.0f))
@@ -294,16 +324,26 @@ static void TaskBallLap_Run(void)
     if (((s_distance_m >= TASK56_MIN_LAP_M) && Track_IsCrossLine()) ||
         (s_distance_m >= TASK56_DIST_STOP_M))
     {
-      s_lap_done = 1;
-      s_split_ms = s_elapsed_ms;    /* 通过 A 的时刻，评分看这个数(≤30s) */
+      s_lap_done    = 1;
+      s_lap_done_ms = HAL_GetTick();
+      s_split_ms    = s_elapsed_ms;  /* 通过 A 的时刻，评分看这个数(≤30s) */
     }
   }
 
   /* ---------- 速度斜坡 ---------- */
-  /* 通过 A 之后不刹车，改成缓慢减速滑停。任务五不要求停车精度，
-     而硬刹车那一下足够把球甩出 1cm */
-  target_rpm = s_lap_done ? 0.0f : TASK56_BASE_RPM;
+  /* 过 A 之后【先匀速再跑一段】才开始减速：判定点前后都保持匀速，
+     减速带来的纵向加速度就不会在评委看球的那一刻把球拽走。
+     滑行这几秒不计入评分时间(s_split_ms 已经在过 A 时锁存了)。
+
+     减速本身也走斜坡而不是刹车 —— 任务五不要求停车精度，
+     而硬刹那一下足够把球甩出 1cm */
+  target_rpm = TASK56_BASE_RPM;
+  if (s_lap_done && ((HAL_GetTick() - s_lap_done_ms) >= TASK56_COAST_MS))
+  {
+    target_rpm = 0.0f;
+  }
   Task_RampBase(target_rpm, TASK56_ACCEL_RPM_PER_S, TASK56_DECEL_RPM_PER_S);
+  Task_UpdateCurveFF();
 
   if (s_lap_done && (s_ramp_rpm <= 0.0f))
   {
@@ -340,6 +380,15 @@ void Task_Update(void)
       s_state = TASK_STATE_IDLE;
       s_elapsed_ms = 0;
       s_distance_m = 0.0f;
+
+      /* 切到载球任务时，先让摆杆把球送回中心 O 待命。
+         任务三/四/五的规则都是"钢球置于中心点 O"再启动 —— 与其靠手摆，
+         不如切过去就自动归位，按 KEY2 时球已经在起点上了。
+         任务六不归位：它的起点本来就是任意指定位置。 */
+      if ((s_task == TASK_3) || (s_task == TASK_4) || (s_task == TASK_5))
+      {
+        Ball_SetTarget(TASK3_CENTER_CM);
+      }
     }
   }
 

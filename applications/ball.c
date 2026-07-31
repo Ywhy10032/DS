@@ -19,6 +19,8 @@ static float    s_target_cm   = BALL_TARGET_CM;
 static float    s_pos_cm      = BALL_TARGET_CM;
 static float    s_vel_cm_s    = 0.0f;
 static float    s_output_us   = 0.0f;
+static float    s_accel_ff    = 0.0f;   /* 小车当前加速度(rpm/秒)，由任务层告知 */
+static float    s_curve_ff    = 0.0f;   /* v_avg x 轮速差，用于过弯前馈 */
 static float    s_stiction_us = 0.0f;   /* 静摩擦补偿的当前爬升值 */
 static uint8_t  s_stick_armed = 0;      /* 补偿是否已武装(球停稳且仍有偏差) */
 static float    s_stick_pos0  = 0.0f;   /* 武装那一刻的球位置，用来判断是否起步 */
@@ -187,8 +189,23 @@ void Ball_Update(void)
       }
 #endif
 
-      Servo_SetPulseUs((uint16_t)(SERVO_LEVEL_US +
-                                  (int16_t)(BALL_OUTPUT_SIGN * s_output_us)));
+      {
+        float out = s_output_us;
+
+#if BALL_FF_ENABLE
+        /* 加速度前馈。车往前加速时球相对摆杆向【后】滑(x 增大)，
+           所以要往 x 减小的方向预先倾杆，符号取负。
+           前馈不进 s_output_us，那个值留给显示，代表反馈控制器的意图 */
+        out -= BALL_FF_US_PER_RPMS * s_accel_ff;
+#endif
+#if BALL_FF_CURVE_ENABLE
+        /* 过弯前馈，同理 —— 向心加速度也是我们自己造出来的，可以提前抵消 */
+        out -= BALL_FF_CURVE_GAIN * s_curve_ff;
+#endif
+
+        Servo_SetPulseUs((uint16_t)(SERVO_LEVEL_US +
+                                    (int16_t)(BALL_OUTPUT_SIGN * out)));
+      }
       s_tracking = 1;
     }
   }
@@ -226,6 +243,16 @@ uint8_t Ball_IsEnabled(void)
 void Ball_SetTarget(float cm)
 {
   s_target_cm = cm;
+}
+
+void Ball_SetAccelFF(float rpm_per_s)
+{
+  s_accel_ff = rpm_per_s;
+}
+
+void Ball_SetCurveFF(float v_times_diff)
+{
+  s_curve_ff = v_times_diff;
 }
 
 float Ball_GetTarget(void)
