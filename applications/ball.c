@@ -23,7 +23,9 @@ static float    s_accel_ff    = 0.0f;   /* 小车当前加速度(rpm/秒)，由�
 static float    s_curve_ff    = 0.0f;   /* v_avg x 轮速差，用于过弯前馈 */
 static float    s_stiction_us = 0.0f;   /* 静摩擦补偿的当前爬升值 */
 static uint8_t  s_stick_armed = 0;      /* 补偿是否已武装(球停稳且仍有偏差) */
+#if BALL_STICTION_ENABLE
 static float    s_stick_pos0  = 0.0f;   /* 武装那一刻的球位置，用来判断是否起步 */
+#endif
 
 static uint32_t s_last_frames = 0;      /* 上次处理到第几帧 */
 static uint32_t s_last_good_ms = 0;     /* 最近一次采纳帧的时刻 */
@@ -124,7 +126,9 @@ void Ball_Update(void)
       /* 偏差落进细调区没有？增益、摩擦前馈、补偿爬升速率【三样都】各有一套，
          统一用这一个判据切换：赶路段要冲劲，细调段要每一脚都轻，
          否则一脚就把球顶过目标 */
+#if (BALL_GAIN_SCHEDULE || BALL_STICTION_ENABLE || BALL_FRICTION_FF_ENABLE)
       uint8_t in_fine = (fabsf(s_target_cm - s_pos_cm) <= BALL_COARSE_ERR_CM);
+#endif
 
 #if BALL_GAIN_SCHEDULE
       /* 偏差大就换激进参数直接顶过静摩擦门槛，进细调区再切回温柔的那套。
