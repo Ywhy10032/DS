@@ -11,6 +11,7 @@
 #include "encoder.h"
 #include "motor.h"
 #include "ball.h"
+#include "servo.h"
 
 #include <math.h>
 
@@ -42,6 +43,11 @@ typedef enum
 
 static Task3_Phase s_t3_phase    = TASK3_GO_PLUS;
 static uint32_t    s_t3_settle_ms = 0;       /* 进入容差圈的时刻 */
+
+/* 任务一：进入前球杆闭环是否开着，结束时原样还回去。
+   舵机脉宽只有一个出口，摆动演示跑起来时球杆闭环必须让位，
+   否则两边每拍互相覆盖，舵机会抖成一团 */
+static uint8_t s_t1_ball_en = 0;
 
 /**
   * @brief  取左右轮的平均累计计数
@@ -135,8 +141,19 @@ static void Task_Start(void)
      用着上一个任务残留的加速度值，把杆莫名其妙地倾着 */
   Ball_SetAccelFF(0.0f);
 
+  /* 任务一：车不动，只让舵机在标定出的机构安全行程内往复摆动，
+     用来验收行程、方向和连杆装配。球杆闭环先摘掉 —— 它和摆动演示都在
+     每拍写脉宽，同时开就是互相抢舵机 */
+  if (s_task == TASK_1)
+  {
+    s_t1_ball_en = Ball_IsEnabled();
+    Ball_Enable(0);
+
+    Track_SetBaseSpeed(0.0f);
+    Servo_DemoInit();
+  }
   /* 任务三：车不动，摆杆先把球送到 +5cm */
-  if (s_task == TASK_3)
+  else if (s_task == TASK_3)
   {
     s_t3_phase     = TASK3_GO_PLUS;
     s_t3_settle_ms = HAL_GetTick();
@@ -168,11 +185,32 @@ static void Task_Finish(Task_State end_state)
   s_elapsed_ms = HAL_GetTick() - s_start_tick;
   s_state      = end_state;
 
+  /* 任务一收尾：摆动停在哪儿就是哪儿，先把杆放回水平点再把球杆闭环还回去。
+     Ball_Enable(1) 内部也会回水平点，但闭环原本没开时(演示/标定模式)
+     就没人管这根杆了，所以这一句不能省 */
+  if (s_task == TASK_1)
+  {
+    Servo_SetPulseUs(SERVO_LEVEL_US);
+    Ball_Enable(s_t1_ball_en);
+  }
+
   Track_Stop();
 
   /* 先给一脚短路刹车。真正把车拽停的是 app.c 的 App_Idle() —— 它会用速度环
      主动反拖，因为短路刹车的制动力矩正比于转速，低速时几乎不起作用 */
   Motor_BrakeAll();
+}
+
+/**
+  * @brief  任务一：舵机在 SERVO_SAFE_MIN_US ~ SERVO_SAFE_MAX_US 之间往复摆动
+  * @note   车全程不动(见 Task_UsesVehicle())。摆动本身由 Servo_DemoUpdate()
+  *         按 tick 匀速推进，与本函数被调用的频率无关，所以 20ms 一拍够用。
+  *
+  *         不设时间兜底：这是个用来看机构的演示，跑到按 KEY2 为止。
+  */
+static void Task1_Run(void)
+{
+  Servo_DemoUpdate();
 }
 
 /**
@@ -415,6 +453,10 @@ void Task_Update(void)
 
   switch (s_task)
   {
+    case TASK_1:
+      Task1_Run();
+      break;
+
     case TASK_2:
       Task2_Run();
       break;
@@ -433,8 +475,6 @@ void Task_Update(void)
       TaskBallLap_Run();
       break;
 
-    /* 任务一待实现，目前只是普通巡线，按 KEY2 停 */
-    case TASK_1:
     default:
       Task_UpdateOdometry();
       break;
@@ -458,8 +498,9 @@ uint8_t Task_IsRunning(void)
 
 uint8_t Task_UsesVehicle(void)
 {
-  /* 任务三是静止任务：车原地不动，全靠摆杆把球送到位 */
-  return (s_task != TASK_3);
+  /* 静止任务：车原地不动。
+     任务一只摆舵机(看机构行程)，任务三全靠摆杆把球送到位 */
+  return ((s_task != TASK_1) && (s_task != TASK_3));
 }
 
 uint32_t Task_GetElapsedMs(void)
