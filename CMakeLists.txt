@@ -58,6 +58,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     applications/tracking.c
     applications/key.c
     applications/task.c
+    applications/servo.c
 
     # Add user sources here
 )

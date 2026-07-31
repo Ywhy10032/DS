@@ -33,8 +33,21 @@ void Key_Init(void);
 /* 扫描一次按键。需周期性调用，建议 10ms */
 void Key_Scan(void);
 
+/* 按住自动连发：按下超过 DELAY 之后，每 PERIOD 次扫描产生一次事件。
+   按 Key_Scan() 10ms 的调用周期算 = 按住 0.4s 后开始，每 10ms 连发一次 */
+#define KEY_REPEAT_DELAY_TICKS  40
+#define KEY_REPEAT_PERIOD_TICKS 1
+
 /* 取走一次"按下"事件(下降沿)，读到后自动清除，不会重复触发 */
 uint8_t Key_WasPressed(Key_ID id);
+
+/**
+  * @brief  取走一次"按下或连发"事件
+  * @note   与 Key_WasPressed() 各自维护事件位，互不影响：
+  *         切任务那种一次只该触发一次的用 WasPressed，
+  *         调参那种按住要连续走的用本函数。
+  */
+uint8_t Key_WasRepeated(Key_ID id);
 
 /* 当前是否按住 */
 uint8_t Key_IsDown(Key_ID id);

@@ -137,8 +137,18 @@ HAL_StatusTypeDef Track_GetStatus(void);
 /* 改基准速度。设为 0 即停车但仍保持循迹计算 */
 void Track_SetBaseSpeed(float rpm);
 
-/* 在线改转向 PID 参数，方便用调试器整定 */
+/* 在线改转向 PID 参数，方便用调试器整定，也用于不同任务切换软硬 */
 void Track_SetTunings(float kp, float ki, float kd);
+
+/* 在线改弯道减速系数。直线任务可以设 0 换取绝对匀速 */
+void Track_SetCurveSlowdown(float rpm_per_mm);
+
+/**
+  * @brief  在线改差速上限(rpm)
+  * @note   差速越大，两轮转速差越悬殊，车body的横摆角加速度也越大。
+  *         载着钢球的任务需要收紧这个值换取平顺，代价是急弯转向力度变小。
+  */
+void Track_SetSteerLimit(float rpm);
 
 /* 立即停车并清空转向 PID 的积分与微分历史 */
 void Track_Stop(void);

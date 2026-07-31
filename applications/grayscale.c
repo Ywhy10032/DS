@@ -1,9 +1,9 @@
 /**
   ******************************************************************************
   * @file           : grayscale.c
-  * @brief          : 感为科技 8 路灰度传感器驱动 (I2C2)
+  * @brief          : 感为科技 8 路灰度传感器驱动 (I2C1)
   ******************************************************************************
-  * @note  I2C2 与 PB10/PB11 的复用由 CubeMX 生成的 MX_I2C2_Init() 完成，
+  * @note  I2C1 与 PB8/PB9 的复用由 CubeMX 生成的 MX_I2C1_Init() 完成，
   *        因此 Gray_Init() 必须在它之后调用。
   ******************************************************************************
   */
@@ -11,7 +11,7 @@
 #include "grayscale.h"
 #include "i2c.h"
 
-#define GRAY_I2C_HANDLE     (&hi2c2)
+#define GRAY_I2C_HANDLE     (&hi2c1)
 #define GRAY_IO_TIMEOUT_MS  100     /* 单次 I2C 传输的超时 */
 #define GRAY_PING_GAP_MS    5       /* 两次 ping 之间的间隔 */
 

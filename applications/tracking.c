@@ -24,6 +24,7 @@ static uint16_t s_lost_ticks  = 0;
 static uint8_t  s_dark_count  = 0;         /* 有多少路探头看到黑色 */
 
 static float    s_base_rpm    = TRACK_BASE_RPM;
+static float    s_curve_slow  = TRACK_CURVE_SLOWDOWN;
 static float    s_target[2]   = {0.0f, 0.0f};   /* [0]=左 [1]=右 */
 
 static HAL_StatusTypeDef s_status = HAL_ERROR;  /* 最近一次灰度读取的结果 */
@@ -88,6 +89,7 @@ void Track_Init(void)
   s_lost       = 0;
   s_lost_ticks = 0;
   s_base_rpm   = TRACK_BASE_RPM;
+  s_curve_slow = TRACK_CURVE_SLOWDOWN;
   s_target[0]  = 0.0f;
   s_target[1]  = 0.0f;
 }
@@ -164,7 +166,7 @@ void Track_Update(void)
   /* ---------- 5. 弯道减速 ---------- */
   /* 偏差越大弯越急，按比例压低基准速度。转向力度有物理上限，速度高到一定
      程度就只能靠减速来换转向半径 —— 这是高速循迹能过弯的关键 */
-  base = s_base_rpm - TRACK_CURVE_SLOWDOWN * fabsf(s_offset);
+  base = s_base_rpm - s_curve_slow * fabsf(s_offset);
 
   /* 减速下限。注意要跟着 s_base_rpm 走：外部把基准设成 0(停车)时，
      下限也必须是 0，否则这里反而会把车重新推起来 */
@@ -225,6 +227,17 @@ HAL_StatusTypeDef Track_GetStatus(void)
 void Track_SetBaseSpeed(float rpm)
 {
   s_base_rpm = rpm;
+}
+
+void Track_SetCurveSlowdown(float rpm_per_mm)
+{
+  s_curve_slow = rpm_per_mm;
+}
+
+void Track_SetSteerLimit(float rpm)
+{
+  PID_SetOutputLimits(&s_steer_pid, -rpm, rpm);
+  PID_SetIntegralLimit(&s_steer_pid, rpm / 2.0f);
 }
 
 void Track_SetTunings(float kp, float ki, float kd)

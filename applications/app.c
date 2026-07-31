@@ -20,6 +20,10 @@
 #include "tracking.h"
 #include "key.h"
 #include "task.h"
+#include "servo.h"
+#include "vision.h"
+
+#include <math.h>
 
 /* ================= 控制参数 ================= */
 
@@ -69,15 +73,72 @@
 #define APP_DK_VALUE_X      (APP_DK_LABEL_X + 3 * APP_FONT_W)
 #define APP_DK_VALUE_LEN    2
 
+/**
+  * 舵机总开关。设 0 时压根不启动 TIM4_CH4 的 PWM：PD15 保持低电平，
+  * 舵机收不到任何脉冲，上电后既不会动作也不会锁死角度(处于失力状态)。
+  *
+  * 注意"输出 0 度的脉冲"和"不输出脉冲"是两回事 —— 前者舵机会用力保持在
+  * 0 度并顶住机构，后者才是真正的没有反应。所以这里是不调 Servo_Init()，
+  * 而不是去设一个角度。
+  *
+  * 设回 1 即恢复：启动 PWM、停在 0 度、KEY3/KEY4 微调、屏幕显示脉宽。
+  */
+#define APP_SERVO_ENABLE    1
+
+/* 舵机演示模式：1 = 在安全行程内自动往复摆动，0 = KEY3/KEY4 手动微调。
+   两者互斥 —— 演示每拍都在写脉宽，开着的话按键调完立刻会被覆盖掉 */
+#define APP_SERVO_DEMO      1
+
+/* ---------------- 分页 ----------------
+   KEY3 循环切换。切页时整屏清空重画，之后照旧只刷新数值字段。
+
+   注意：APP_SERVO_DEMO 设为 0(舵机手动标定)时，KEY3/KEY4 会被征用为脉宽
+   微调，此时无法翻页 —— 标定是临时模式，两者不会同时用。 */
+typedef enum
+{
+  APP_PAGE_MAIN = 0,      /* 循迹主界面 */
+  APP_PAGE_VISION,        /* 视觉模块数据 */
+  APP_PAGE_NUM
+} App_Page;
+
 /* 刷屏走 SPI 是毫秒级阻塞操作，摊开成每次只画一个字段才不会挤占控制节拍。
-   8 路灰度 + 偏差 + 黑路数 + 2 个转速 + 里程 = 13 个字段 */
+   8 路灰度 + 偏差 + 黑路数 + 2 个转速 + 里程 (+ 舵机脉宽) */
 #define APP_DRAW_EVERY      2
-#define APP_FIELD_NUM       (GRAY_CHANNEL_NUM + 5)
+#if APP_SERVO_ENABLE
+#define APP_MAIN_FIELD_NUM  (GRAY_CHANNEL_NUM + 6)
+#else
+#define APP_MAIN_FIELD_NUM  (GRAY_CHANNEL_NUM + 5)   /* 少一个舵机脉宽字段 */
+#endif
 #define APP_FIELD_OFFSET    (GRAY_CHANNEL_NUM)
 #define APP_FIELD_DARK      (GRAY_CHANNEL_NUM + 1)
 #define APP_FIELD_LRPM      (GRAY_CHANNEL_NUM + 2)
 #define APP_FIELD_RRPM      (GRAY_CHANNEL_NUM + 3)
 #define APP_FIELD_DIST      (GRAY_CHANNEL_NUM + 4)
+#define APP_FIELD_SERVO     (GRAY_CHANNEL_NUM + 5)
+
+/* ---------------- 视觉页 ---------------- */
+#define APP_VIS_Y0          52
+#define APP_VIS_DY          32
+#define APP_VIS_VALUE_X     (APP_LABEL_X + 6 * APP_FONT_W)
+#define APP_VIS_VALUE_LEN   8
+
+enum
+{
+  APP_VIS_X = 0,          /* 沿摆杆轴线的位置 cm */
+  APP_VIS_VX,             /* 横向像素速度 */
+  APP_VIS_CONF,           /* YOLO 置信度 */
+  APP_VIS_TS,             /* 视觉端时间戳 */
+  APP_VIS_FRAMES,         /* 累计收到的帧数 */
+  APP_VIS_ERR,            /* 解析失败 + 串口错误 */
+  APP_VIS_AGE,            /* 距上一帧多久 */
+  APP_VIS_LINK,           /* 链路是否新鲜 */
+  APP_VISION_FIELD_NUM
+};
+
+/* 舵机脉宽，标定机构行程时直接读这个数 */
+#define APP_SERVO_LABEL_X   120
+#define APP_SERVO_VALUE_X   (APP_SERVO_LABEL_X + 3 * APP_FONT_W)
+#define APP_SERVO_VALUE_LEN 4
 
 /* 里程显示，用来校准轮径：跑完一圈应该读到赛道实测长度 */
 #define APP_DIST_LABEL_X    140
@@ -89,6 +150,9 @@
 
 /* 显示用的一阶低通系数 */
 #define APP_DISP_ALPHA      0.15f
+
+/* 实测转速低于此值(rpm)就认为车停稳了，可以从主动反拖切换成短路刹车驻车 */
+#define APP_STOP_RPM_TH     3.0f
 
 /* ================= 运行时状态 ================= */
 static PID_Controller s_pid[MOTOR_NUM];
@@ -106,9 +170,18 @@ static uint8_t  s_outer_cnt  = 0;
 static uint8_t  s_draw_cnt   = 0;
 static uint8_t  s_draw_field = 0;
 static uint8_t  s_time_cnt   = 0;
+static App_Page s_page       = APP_PAGE_MAIN;
 
 /**
-  * @brief  画出不会变化的部分
+  * @brief  当前页有几个数值字段
+  */
+static uint8_t App_FieldCount(void)
+{
+  return (s_page == APP_PAGE_VISION) ? APP_VISION_FIELD_NUM : APP_MAIN_FIELD_NUM;
+}
+
+/**
+  * @brief  画主界面里不会变化的部分
   */
 static void App_DrawStaticLayout(void)
 {
@@ -118,6 +191,9 @@ static void App_DrawStaticLayout(void)
   LCD_SetColor(LCD_WHITE);
 
   LCD_DisplayString(APP_LABEL_X, APP_TIME_Y, "TIME:");
+#if APP_SERVO_ENABLE
+  LCD_DisplayString(APP_SERVO_LABEL_X, APP_STATE_Y, "US:");
+#endif
 
   for (uint8_t i = 0; i < GRAY_CHANNEL_NUM; i++)
   {
@@ -137,10 +213,37 @@ static void App_DrawStaticLayout(void)
 }
 
 /**
+  * @brief  画视觉页里不会变化的部分
+  */
+static void App_DrawVisionLayout(void)
+{
+  static const char *labels[APP_VISION_FIELD_NUM] =
+  {
+    "X:", "VX:", "CONF:", "TS:", "RX:", "ERR:", "AGE:", "LINK:"
+  };
+
+  LCD_SetAsciiFont(&APP_FONT);
+  LCD_SetColor(LCD_WHITE);
+
+  LCD_DisplayString((LCD_Width - 6 * APP_FONT_W) / 2, APP_TASK_Y, "VISION");
+
+  for (uint8_t i = 0; i < APP_VISION_FIELD_NUM; i++)
+  {
+    LCD_DisplayString(APP_LABEL_X, APP_VIS_Y0 + i * APP_VIS_DY, (char *)labels[i]);
+  }
+}
+
+/**
   * @brief  任务号与状态，只在变化时重画
   */
 static void App_DrawTaskLine(void)
 {
+  /* 这几行只属于主界面；在别的页上调用会画花屏幕 */
+  if (s_page != APP_PAGE_MAIN)
+  {
+    return;
+  }
+
   char title[8] = "TASK 1";
 
   LCD_SetAsciiFont(&APP_FONT);
@@ -152,6 +255,12 @@ static void App_DrawTaskLine(void)
 
 static void App_DrawStateLine(void)
 {
+  /* 这几行只属于主界面；在别的页上调用会画花屏幕 */
+  if (s_page != APP_PAGE_MAIN)
+  {
+    return;
+  }
+
   LCD_SetAsciiFont(&APP_FONT);
 
   switch (Task_GetState())
@@ -175,6 +284,12 @@ static void App_DrawStateLine(void)
 
 static void App_DrawStatus(void)
 {
+  /* 这几行只属于主界面；在别的页上调用会画花屏幕 */
+  if (s_page != APP_PAGE_MAIN)
+  {
+    return;
+  }
+
   LCD_SetAsciiFont(&APP_FONT);
 
   if (s_gray_status == HAL_OK)
@@ -190,14 +305,87 @@ static void App_DrawStatus(void)
 }
 
 /**
-  * @brief  行驶总时间，秒 + 两位小数
+  * @brief  计时显示，秒 + 两位小数
+  * @note   任务四/五到达评分点后改显示锁存的分段时间并标青色 ——
+  *         任务四是 A->B(≤8s)、任务五是整圈到 A(≤30s)。行驶总时间还包含
+  *         之后的减速滑停段，比评分时间多一两秒，不能拿来对照。
   */
 static void App_DrawTime(void)
 {
+  /* 这几行只属于主界面；在别的页上调用会画花屏幕 */
+  if (s_page != APP_PAGE_MAIN)
+  {
+    return;
+  }
+
+  uint32_t split_ms = Task_GetSplitMs();
+
   LCD_SetAsciiFont(&APP_FONT);
+
+  if (split_ms != 0U)
+  {
+    LCD_SetColor(LCD_CYAN);
+    LCD_DisplayDecimals(APP_VALUE_X, APP_TIME_Y,
+                        (double)split_ms / 1000.0, APP_VALUE_LEN, 2);
+    return;
+  }
+
   LCD_SetColor(Task_IsRunning() ? LCD_WHITE : LCD_YELLOW);
   LCD_DisplayDecimals(APP_VALUE_X, APP_TIME_Y,
                       (double)Task_GetElapsedMs() / 1000.0, APP_VALUE_LEN, 2);
+}
+
+/**
+  * @brief  重画视觉页的一个数值字段
+  */
+static void App_DrawVisionField(uint8_t field)
+{
+  const Vision_Ball *b = Vision_GetBall();
+  uint16_t           y = APP_VIS_Y0 + field * APP_VIS_DY;
+
+  LCD_SetAsciiFont(&APP_FONT);
+
+  /* 数据过期时整页数值转灰白，避免把陈旧坐标当成实时值读 */
+  LCD_SetColor(Vision_IsFresh() ? LCD_GREEN : LCD_RED);
+
+  switch (field)
+  {
+    case APP_VIS_X:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, b->x_cm, APP_VIS_VALUE_LEN, 2);
+      break;
+
+    case APP_VIS_VX:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, b->vx_pixel_s, APP_VIS_VALUE_LEN, 1);
+      break;
+
+    case APP_VIS_CONF:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, b->confidence, APP_VIS_VALUE_LEN, 2);
+      break;
+
+    case APP_VIS_TS:
+      LCD_SetColor(LCD_WHITE);
+      LCD_DisplayNumber(APP_VIS_VALUE_X, y, (int32_t)b->frame_time_ms, APP_VIS_VALUE_LEN);
+      break;
+
+    case APP_VIS_FRAMES:
+      LCD_SetColor(LCD_WHITE);
+      LCD_DisplayNumber(APP_VIS_VALUE_X, y, (int32_t)Vision_GetFrameCount(), APP_VIS_VALUE_LEN);
+      break;
+
+    case APP_VIS_ERR:
+      /* 有错就标红。偶发几次是对端上电抖动，持续增长就是波特率或接线问题 */
+      LCD_SetColor((Vision_GetErrorCount() == 0U) ? LCD_WHITE : LCD_RED);
+      LCD_DisplayNumber(APP_VIS_VALUE_X, y, (int32_t)Vision_GetErrorCount(), APP_VIS_VALUE_LEN);
+      break;
+
+    case APP_VIS_AGE:
+      LCD_DisplayNumber(APP_VIS_VALUE_X, y, (int32_t)Vision_GetAgeMs(), APP_VIS_VALUE_LEN);
+      break;
+
+    default:    /* APP_VIS_LINK */
+      LCD_DisplayString(APP_VIS_VALUE_X, y, Vision_IsFresh() ? "  OK  " : " LOST ");
+      break;
+  }
 }
 
 /**
@@ -206,6 +394,12 @@ static void App_DrawTime(void)
   */
 static void App_DrawField(uint8_t field)
 {
+  if (s_page == APP_PAGE_VISION)
+  {
+    App_DrawVisionField(field);
+    return;
+  }
+
   LCD_SetAsciiFont(&APP_FONT);
 
   if (field < GRAY_CHANNEL_NUM)
@@ -248,12 +442,20 @@ static void App_DrawField(uint8_t field)
     LCD_DisplayNumber(APP_RPM_R_X + 2 * APP_FONT_W, APP_RPM_Y,
                       (int32_t)s_rpm_disp[MOTOR_RIGHT], APP_RPM_VALUE_LEN);
   }
-  else
+  else if (field == APP_FIELD_DIST)
   {
     LCD_SetColor(LCD_WHITE);
     LCD_DisplayDecimals(APP_DIST_VALUE_X, APP_I2C_Y,
                         Task_GetDistanceM(), APP_DIST_VALUE_LEN, 2);
   }
+#if APP_SERVO_ENABLE
+  else
+  {
+    LCD_SetColor(LCD_YELLOW);
+    LCD_DisplayNumber(APP_SERVO_VALUE_X, APP_STATE_Y,
+                      (int32_t)Servo_GetPulseUs(), APP_SERVO_VALUE_LEN);
+  }
+#endif
 }
 
 /**
@@ -275,21 +477,48 @@ static void App_SpeedLoop(void)
 }
 
 /**
-  * @brief  任务未运行时的处理：刹车并把速度环清干净
-  * @note   必须清积分，否则下次启动时会带着上一轮的残留猛冲一下
+  * @brief  任务未运行时的处理：先主动刹到零，停稳后再短路刹车驻车
+  *
+  * @note   TB6612 的短路刹车靠电机反电动势产生制动力矩，而反电动势正比于转速
+  *         —— 蠕行速度(40rpm)下反电动势很小，制动力矩弱得可怜，车会滑出一截。
+  *         所以这里先让速度环以 0 为目标继续工作，它会输出反向 PWM 把车【拽】停，
+  *         制动力矩不再依赖车速。等真正停稳了再切成短路刹车驻车、并清空积分。
   */
 static void App_Idle(void)
 {
+  uint8_t moving = 0;
+
   for (uint8_t i = 0; i < MOTOR_NUM; i++)
   {
     Encoder_ID enc = (i == MOTOR_LEFT) ? ENCODER_LEFT : ENCODER_RIGHT;
 
     s_rpm[i]    = Encoder_GetRPM(enc, APP_CTRL_MS);
     s_target[i] = 0.0f;
-    s_out[i]    = 0.0f;
-    PID_Reset(&s_pid[i]);
+
+    if (fabsf(s_rpm[i]) > APP_STOP_RPM_TH)
+    {
+      moving = 1;
+    }
 
     s_rpm_disp[i] += APP_DISP_ALPHA * (s_rpm[i] - s_rpm_disp[i]);
+  }
+
+  if (moving)
+  {
+    /* 还在滑行：速度环主动反拖 */
+    for (uint8_t i = 0; i < MOTOR_NUM; i++)
+    {
+      s_out[i] = PID_Update(&s_pid[i], 0.0f, s_rpm[i]);
+      Motor_SetSpeed((Motor_ID)i, (int16_t)s_out[i]);
+    }
+    return;
+  }
+
+  /* 已经停稳：短路刹车驻车。必须清积分，否则下次启动会带着残留猛冲一下 */
+  for (uint8_t i = 0; i < MOTOR_NUM; i++)
+  {
+    s_out[i] = 0.0f;
+    PID_Reset(&s_pid[i]);
   }
 
   Motor_BrakeAll();
@@ -299,13 +528,16 @@ void App_Init(void)
 {
   /* ---------- LCD ---------- */
   SPI_LCD_Init();
-  LCD_SetDirection(Direction_V);        /* 竖屏 240x320 */
+  LCD_SetDirection(Direction_V_Flip);   /* 竖屏 240x320，整屏旋转 180 度 */
   LCD_SetBackColor(LCD_BLACK);
   LCD_SetColor(LCD_WHITE);
   LCD_Clear();
   LCD_ShowNumMode(Fill_Space);
 
   App_DrawStaticLayout();
+
+  /* ---------- 视觉模块 ---------- */
+  Vision_Init();
 
   /* ---------- 灰度传感器 ---------- */
   s_gray_status = Gray_Init();
@@ -326,6 +558,14 @@ void App_Init(void)
   /* ---------- 外环与任务层 ---------- */
   Track_Init();
   Task_Init();
+
+  /* ---------- 舵机 ---------- */
+#if APP_SERVO_ENABLE
+  Servo_Init();                         /* 启动 PWM，回到水平点 1500us */
+#if APP_SERVO_DEMO
+  Servo_DemoInit();                     /* 在安全行程内往复摆动 */
+#endif
+#endif
 
   App_DrawTaskLine();
   App_DrawStateLine();
@@ -350,6 +590,25 @@ void App_Run(void)
 
   /* ---------- 按键：每拍扫描 ---------- */
   Key_Scan();
+
+#if APP_SERVO_ENABLE
+#if APP_SERVO_DEMO
+  Servo_DemoUpdate();                   /* 在 1050~2400us 之间往复摆动 */
+#else
+  /* KEY3/KEY4：舵机以最小步进(1us)增减脉宽，用来标定机构行程。
+     用 Key_WasRepeated() 而不是 Key_WasPressed()：按住会连发，
+     否则 1us 一步走完整个行程要按上千下。
+     KEY1/KEY2 由 Task_Update() 用 Key_WasPressed() 消费，两套事件位互不影响 */
+  if (Key_WasRepeated(KEY3))
+  {
+    Servo_StepUs(+SERVO_STEP_US);
+  }
+  if (Key_WasRepeated(KEY4))
+  {
+    Servo_StepUs(-SERVO_STEP_US);
+  }
+#endif
+#endif
 
   /* ---------- 任务层 + 循迹外环：每 2 拍 ---------- */
   s_outer_cnt++;
