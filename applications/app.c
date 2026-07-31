@@ -154,6 +154,9 @@ enum
   APP_BALL_FIELD_NUM
 };
 
+/* ERR 超过这个值就标红。取任务五/六要求的 1cm */
+#define APP_BALL_ERR_LIMIT_CM   1.0f
+
 /* 舵机脉宽，标定机构行程时直接读这个数 */
 #define APP_SERVO_LABEL_X   120
 #define APP_SERVO_VALUE_X   (APP_SERVO_LABEL_X + 3 * APP_FONT_W)
@@ -302,9 +305,14 @@ static void App_DrawBallField(uint8_t field)
       break;
 
     case APP_BALL_ERR:
-      LCD_DisplayDecimals(APP_VIS_VALUE_X, y,
-                          Ball_GetTarget() - Ball_GetPosCm(), APP_VIS_VALUE_LEN, 2);
+    {
+      float err = Ball_GetTarget() - Ball_GetPosCm();
+
+      /* 1cm 就是任务五/六的评分门限，超了标红 —— 不用心算，扫一眼就知道达没达标 */
+      LCD_SetColor((fabsf(err) > APP_BALL_ERR_LIMIT_CM) ? LCD_RED : LCD_GREEN);
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, err, APP_VIS_VALUE_LEN, 2);
       break;
+    }
 
     case APP_BALL_VEL:
       LCD_DisplayDecimals(APP_VIS_VALUE_X, y, Ball_GetVelCmS(), APP_VIS_VALUE_LEN, 1);
