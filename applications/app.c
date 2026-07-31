@@ -707,9 +707,9 @@ void App_Init(void)
 #endif
 #endif
 
-  App_DrawTaskLine();
-  App_DrawStateLine();
-  App_DrawTime();
+  /* 所有模块都初始化完了，整屏重画一次当前页 —— 与 KEY3 翻页走同一条路径，
+     免得两处各画各的、以后加字段时漏掉一边 */
+  App_ShowPage();
   s_shown_task  = Task_GetId();
   s_shown_state = Task_GetState();
 

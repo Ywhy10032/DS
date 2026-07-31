@@ -10,6 +10,8 @@
 #include "servo.h"
 #include "pid.h"
 
+#include <math.h>
+
 /* ---------------- 运行时状态 ---------------- */
 static PID_Controller s_pid;
 
@@ -17,6 +19,9 @@ static float    s_target_cm   = BALL_TARGET_CM;
 static float    s_pos_cm      = BALL_TARGET_CM;
 static float    s_vel_cm_s    = 0.0f;
 static float    s_output_us   = 0.0f;
+static float    s_stiction_us = 0.0f;   /* 静摩擦补偿的当前爬升值 */
+static uint8_t  s_stick_armed = 0;      /* 补偿是否已武装(球停稳且仍有偏差) */
+static float    s_stick_pos0  = 0.0f;   /* 武装那一刻的球位置，用来判断是否起步 */
 
 static uint32_t s_last_frames = 0;      /* 上次处理到第几帧 */
 static uint32_t s_last_good_ms = 0;     /* 最近一次采纳帧的时刻 */
@@ -35,10 +40,12 @@ static void Ball_GoLevel(void)
   Servo_SetPulseUs(SERVO_LEVEL_US);
   PID_Reset(&s_pid);
 
-  s_output_us = 0.0f;
-  s_vel_cm_s  = 0.0f;
-  s_have_prev = 0;
-  s_tracking  = 0;
+  s_output_us   = 0.0f;
+  s_stiction_us = 0.0f;
+  s_stick_armed = 0;
+  s_vel_cm_s    = 0.0f;
+  s_have_prev   = 0;
+  s_tracking    = 0;
 }
 
 void Ball_Init(void)
@@ -100,7 +107,10 @@ void Ball_Update(void)
          再换成它会更平滑(源头是滤波器输出，噪声小)。 */
       if (s_have_prev)
       {
-        s_vel_cm_s = (s_pos_cm - s_prev_pos_cm) / dt;
+        /* 差分把位置噪声放大了 1/dt(约 30) 倍，必须低通一下再用 */
+        float raw_vel = (s_pos_cm - s_prev_pos_cm) / dt;
+
+        s_vel_cm_s += BALL_VEL_LPF * (raw_vel - s_vel_cm_s);
       }
       else
       {
@@ -114,6 +124,55 @@ void Ball_Update(void)
          幅度随帧率漂移 */
       s_pid.dt    = dt;
       s_output_us = PID_Update(&s_pid, s_target_cm, s_pos_cm);
+
+#if BALL_STICTION_ENABLE
+      /* 静摩擦补偿：球几乎静止却仍有偏差时，逐步加大倾角直到它起步。
+         只在静止时介入 —— 球一动起来就归零、交还给正常 PID，
+         所以不会在目标附近反复推 */
+      {
+        float err = s_target_cm - s_pos_cm;
+
+        if (fabsf(err) <= BALL_STICTION_ERR_CM)
+        {
+          /* 已经到位，不折腾 */
+          s_stick_armed = 0;
+          s_stiction_us = 0.0f;
+        }
+        else if (!s_stick_armed)
+        {
+          /* 等球真正停下来才重新武装。不加这个条件的话，球刚起步就会被
+             立刻重新加载补偿，等于一直踩着油门 */
+          if (fabsf(s_vel_cm_s) < BALL_STICTION_VEL_CMS)
+          {
+            s_stick_armed = 1;
+            s_stick_pos0  = s_pos_cm;
+            s_stiction_us = 0.0f;
+          }
+        }
+        else if (fabsf(s_pos_cm - s_stick_pos0) > BALL_STICTION_MOVE_CM)
+        {
+          /* 球挣脱了。立刻(而不是缓降)撤掉大倾角，交还给 PID —— 慢一步就是过冲 */
+          s_stick_armed = 0;
+          s_stiction_us = 0.0f;
+        }
+        else
+        {
+          s_stiction_us += BALL_STICTION_RAMP_UPS * dt;
+          if (s_stiction_us > BALL_STICTION_US)
+          {
+            s_stiction_us = BALL_STICTION_US;
+          }
+
+          /* 只在 PID 自己给不出这么大幅度时才顶上去 */
+          if (fabsf(s_output_us) < s_stiction_us)
+          {
+            /* 用偏差的符号而不是输出的符号：球静止时微分项为 0，
+               输出可能因为积分尚未累积而接近 0，符号不可靠 */
+            s_output_us = (err > 0.0f) ? s_stiction_us : -s_stiction_us;
+          }
+        }
+      }
+#endif
 
       Servo_SetPulseUs((uint16_t)(SERVO_LEVEL_US +
                                   (int16_t)(BALL_OUTPUT_SIGN * s_output_us)));
