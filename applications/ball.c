@@ -119,6 +119,19 @@ void Ball_Update(void)
       }
       s_prev_pos_cm = s_pos_cm;
 
+#if BALL_GAIN_SCHEDULE
+      /* 偏差大就换激进参数直接顶过静摩擦门槛，进细调区再切回温柔的那套。
+         限幅不动 —— 它同时管着刹车权限，中途缩水会导致冲过头 */
+      if (fabsf(s_target_cm - s_pos_cm) > BALL_COARSE_ERR_CM)
+      {
+        PID_SetTunings(&s_pid, BALL_COARSE_KP, 0.0f, BALL_COARSE_KD);
+      }
+      else
+      {
+        PID_SetTunings(&s_pid, BALL_KP, BALL_KI, BALL_KD);
+      }
+#endif
+
       /* PID 内部的微分作用在【测量值】上，正好就是我们要的"按球速阻尼"。
          dt 每帧都在变，所以每次都要更新 —— 用固定 dt 会让微分项的
          幅度随帧率漂移 */
