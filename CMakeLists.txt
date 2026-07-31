@@ -59,6 +59,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     applications/key.c
     applications/task.c
     applications/servo.c
+    applications/vision.c
 
     # Add user sources here
 )

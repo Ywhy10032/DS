@@ -215,6 +215,8 @@ static void App_DrawStaticLayout(void)
 /**
   * @brief  画视觉页里不会变化的部分
   */
+static void App_ShowPage(void);
+
 static void App_DrawVisionLayout(void)
 {
   static const char *labels[APP_VISION_FIELD_NUM] =
@@ -524,6 +526,30 @@ static void App_Idle(void)
   Motor_BrakeAll();
 }
 
+/**
+  * @brief  整屏切换到当前页
+  * @note   页与页的静态文字位置不同，必须整屏清空重画；之后回到"每拍只刷一个
+  *         数值字段"的常规节奏，不会持续占用 SPI
+  */
+static void App_ShowPage(void)
+{
+  LCD_Clear();
+  s_draw_field = 0;
+  s_draw_cnt   = 0;
+
+  if (s_page == APP_PAGE_VISION)
+  {
+    App_DrawVisionLayout();
+    return;
+  }
+
+  App_DrawStaticLayout();
+  App_DrawTaskLine();
+  App_DrawStateLine();
+  App_DrawTime();
+  App_DrawStatus();
+}
+
 void App_Init(void)
 {
   /* ---------- LCD ---------- */
@@ -590,6 +616,20 @@ void App_Run(void)
 
   /* ---------- 按键：每拍扫描 ---------- */
   Key_Scan();
+
+  /* ---------- 视觉：解析中断收进来的字节 ---------- */
+  Vision_Update();
+
+#if (APP_SERVO_ENABLE && !APP_SERVO_DEMO)
+  /* 舵机标定模式征用了 KEY3/KEY4，此时不翻页 */
+#else
+  /* KEY3：切换显示页面 */
+  if (Key_WasPressed(KEY3))
+  {
+    s_page = (App_Page)((s_page + 1) % APP_PAGE_NUM);
+    App_ShowPage();
+  }
+#endif
 
 #if APP_SERVO_ENABLE
 #if APP_SERVO_DEMO
@@ -670,6 +710,6 @@ void App_Run(void)
   {
     s_draw_cnt = 0;
     App_DrawField(s_draw_field);
-    s_draw_field = (uint8_t)((s_draw_field + 1) % APP_FIELD_NUM);
+    s_draw_field = (uint8_t)((s_draw_field + 1) % App_FieldCount());
   }
 }

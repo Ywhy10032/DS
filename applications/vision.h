@@ -33,11 +33,15 @@
 #define VISION_TIMEOUT_MS       200
 
 /**
-  * CubeMX 的 NVIC 页没有勾选 UART4 global interrupt，所以中断向量和使能都在
-  * vision.c 里补。若之后在 CubeMX 里勾上了，stm32f4xx_it.c 会生成同名的
-  * UART4_IRQHandler，链接会报 multiple definition —— 那时把本宏改成 0。
+  * 中断向量与 NVIC 使能由谁负责。
+  *
+  * 现在 CubeMX 的 NVIC 页已经勾选了 UART4 global interrupt，
+  * stm32f4xx_it.c 会生成 UART4_IRQHandler、usart.c 里也会调
+  * HAL_NVIC_EnableIRQ() —— 所以本模块不能再定义一份，否则链接冲突。
+  *
+  * 只有在 CubeMX 里【没有】勾选该中断时才需要把它设回 1。
   */
-#define VISION_OWN_IRQ_HANDLER  1
+#define VISION_OWN_IRQ_HANDLER  0
 
 typedef struct
 {
