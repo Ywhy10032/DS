@@ -22,6 +22,7 @@
 #include "task.h"
 #include "servo.h"
 #include "vision.h"
+#include "ball.h"
 
 #include <math.h>
 
@@ -74,20 +75,24 @@
 #define APP_DK_VALUE_LEN    2
 
 /**
-  * 舵机总开关。设 0 时压根不启动 TIM4_CH4 的 PWM：PD15 保持低电平，
-  * 舵机收不到任何脉冲，上电后既不会动作也不会锁死角度(处于失力状态)。
+  * 舵机工作模式。四种互斥 —— 谁都在每拍写脉宽，同时开就会互相覆盖。
   *
-  * 注意"输出 0 度的脉冲"和"不输出脉冲"是两回事 —— 前者舵机会用力保持在
-  * 0 度并顶住机构，后者才是真正的没有反应。所以这里是不调 Servo_Init()，
-  * 而不是去设一个角度。
-  *
-  * 设回 1 即恢复：启动 PWM、停在 0 度、KEY3/KEY4 微调、屏幕显示脉宽。
+  *   OFF     压根不启动 TIM4_CH4 的 PWM。PD15 保持低电平，舵机收不到任何
+  *           脉冲，既不动作也不锁角度(失力状态)。注意这与"输出 0 度的脉冲"
+  *           完全不同：后者舵机会用力顶在 0 度上。
+  *   DEMO    在安全行程内自动往复摆动，用来验证机构行程与方向。
+  *   MANUAL  KEY3/KEY4 以 1us 步进手动微调，用来标定 SERVO_SAFE_* 与水平点。
+  *           此模式会征用 KEY3，翻页功能失效。
+  *   BALL    球杆闭环，由视觉数据驱动。
   */
-#define APP_SERVO_ENABLE    1
-
-/* 舵机演示模式：1 = 在安全行程内自动往复摆动，0 = KEY3/KEY4 手动微调。
-   两者互斥 —— 演示每拍都在写脉宽，开着的话按键调完立刻会被覆盖掉 */
+#define APP_SERVO_OFF       0
 #define APP_SERVO_DEMO      1
+#define APP_SERVO_MANUAL    2
+#define APP_SERVO_BALL      3
+
+#define APP_SERVO_MODE      APP_SERVO_BALL
+
+#define APP_SERVO_ENABLE    (APP_SERVO_MODE != APP_SERVO_OFF)
 
 /* ---------------- 分页 ----------------
    KEY3 循环切换。切页时整屏清空重画，之后照旧只刷新数值字段。
@@ -97,7 +102,8 @@
 typedef enum
 {
   APP_PAGE_MAIN = 0,      /* 循迹主界面 */
-  APP_PAGE_VISION,        /* 视觉模块数据 */
+  APP_PAGE_VISION,        /* 视觉模块原始数据 */
+  APP_PAGE_BALL,          /* 球杆闭环 */
   APP_PAGE_NUM
 } App_Page;
 
@@ -133,6 +139,19 @@ enum
   APP_VIS_AGE,            /* 距上一帧多久 */
   APP_VIS_LINK,           /* 链路是否新鲜 */
   APP_VISION_FIELD_NUM
+};
+
+/* ---------------- 球杆页 ---------------- */
+enum
+{
+  APP_BALL_SET = 0,       /* 目标位置 cm */
+  APP_BALL_POS,           /* 实测位置 cm */
+  APP_BALL_ERR,           /* 偏差 cm */
+  APP_BALL_VEL,           /* 球速 cm/s */
+  APP_BALL_OUT,           /* PID 输出，相对水平点的 us 偏移 */
+  APP_BALL_US,            /* 实际下发的舵机脉宽 */
+  APP_BALL_STATE,         /* 是否正在闭环 */
+  APP_BALL_FIELD_NUM
 };
 
 /* 舵机脉宽，标定机构行程时直接读这个数 */
@@ -177,7 +196,12 @@ static App_Page s_page       = APP_PAGE_MAIN;
   */
 static uint8_t App_FieldCount(void)
 {
-  return (s_page == APP_PAGE_VISION) ? APP_VISION_FIELD_NUM : APP_MAIN_FIELD_NUM;
+  switch (s_page)
+  {
+    case APP_PAGE_VISION: return APP_VISION_FIELD_NUM;
+    case APP_PAGE_BALL:   return APP_BALL_FIELD_NUM;
+    default:              return APP_MAIN_FIELD_NUM;
+  }
 }
 
 /**
@@ -232,6 +256,75 @@ static void App_DrawVisionLayout(void)
   for (uint8_t i = 0; i < APP_VISION_FIELD_NUM; i++)
   {
     LCD_DisplayString(APP_LABEL_X, APP_VIS_Y0 + i * APP_VIS_DY, (char *)labels[i]);
+  }
+}
+
+/**
+  * @brief  画球杆页里不会变化的部分
+  */
+static void App_DrawBallLayout(void)
+{
+  static const char *labels[APP_BALL_FIELD_NUM] =
+  {
+    "SET:", "POS:", "ERR:", "VEL:", "OUT:", "US:", "RUN:"
+  };
+
+  LCD_SetAsciiFont(&APP_FONT);
+  LCD_SetColor(LCD_WHITE);
+
+  LCD_DisplayString((LCD_Width - 4 * APP_FONT_W) / 2, APP_TASK_Y, "BALL");
+
+  for (uint8_t i = 0; i < APP_BALL_FIELD_NUM; i++)
+  {
+    LCD_DisplayString(APP_LABEL_X, APP_VIS_Y0 + i * APP_VIS_DY, (char *)labels[i]);
+  }
+}
+
+/**
+  * @brief  重画球杆页的一个数值字段
+  */
+static void App_DrawBallField(uint8_t field)
+{
+  uint16_t y = APP_VIS_Y0 + field * APP_VIS_DY;
+
+  LCD_SetAsciiFont(&APP_FONT);
+  LCD_SetColor(Ball_IsTracking() ? LCD_GREEN : LCD_RED);
+
+  switch (field)
+  {
+    case APP_BALL_SET:
+      LCD_SetColor(LCD_WHITE);
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, Ball_GetTarget(), APP_VIS_VALUE_LEN, 2);
+      break;
+
+    case APP_BALL_POS:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, Ball_GetPosCm(), APP_VIS_VALUE_LEN, 2);
+      break;
+
+    case APP_BALL_ERR:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y,
+                          Ball_GetTarget() - Ball_GetPosCm(), APP_VIS_VALUE_LEN, 2);
+      break;
+
+    case APP_BALL_VEL:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, Ball_GetVelCmS(), APP_VIS_VALUE_LEN, 1);
+      break;
+
+    case APP_BALL_OUT:
+      LCD_SetColor(LCD_CYAN);
+      LCD_DisplayNumber(APP_VIS_VALUE_X, y, (int32_t)Ball_GetOutputUs(), APP_VIS_VALUE_LEN);
+      break;
+
+    case APP_BALL_US:
+      LCD_SetColor(LCD_YELLOW);
+      LCD_DisplayNumber(APP_VIS_VALUE_X, y, (int32_t)Servo_GetPulseUs(), APP_VIS_VALUE_LEN);
+      break;
+
+    default:    /* APP_BALL_STATE */
+      LCD_DisplayString(APP_VIS_VALUE_X, y,
+                        Ball_IsEnabled() ? (Ball_IsTracking() ? " TRACK " : " LOST  ")
+                                         : "  OFF  ");
+      break;
   }
 }
 
@@ -401,6 +494,11 @@ static void App_DrawField(uint8_t field)
     App_DrawVisionField(field);
     return;
   }
+  if (s_page == APP_PAGE_BALL)
+  {
+    App_DrawBallField(field);
+    return;
+  }
 
   LCD_SetAsciiFont(&APP_FONT);
 
@@ -542,6 +640,11 @@ static void App_ShowPage(void)
     App_DrawVisionLayout();
     return;
   }
+  if (s_page == APP_PAGE_BALL)
+  {
+    App_DrawBallLayout();
+    return;
+  }
 
   App_DrawStaticLayout();
   App_DrawTaskLine();
@@ -588,8 +691,11 @@ void App_Init(void)
   /* ---------- 舵机 ---------- */
 #if APP_SERVO_ENABLE
   Servo_Init();                         /* 启动 PWM，回到水平点 1500us */
-#if APP_SERVO_DEMO
-  Servo_DemoInit();                     /* 在安全行程内往复摆动 */
+#if (APP_SERVO_MODE == APP_SERVO_DEMO)
+  Servo_DemoInit();
+#elif (APP_SERVO_MODE == APP_SERVO_BALL)
+  Ball_Init();
+  Ball_Enable(1);
 #endif
 #endif
 
@@ -620,7 +726,7 @@ void App_Run(void)
   /* ---------- 视觉：解析中断收进来的字节 ---------- */
   Vision_Update();
 
-#if (APP_SERVO_ENABLE && !APP_SERVO_DEMO)
+#if (APP_SERVO_MODE == APP_SERVO_MANUAL)
   /* 舵机标定模式征用了 KEY3/KEY4，此时不翻页 */
 #else
   /* KEY3：切换显示页面 */
@@ -631,10 +737,11 @@ void App_Run(void)
   }
 #endif
 
-#if APP_SERVO_ENABLE
-#if APP_SERVO_DEMO
+#if (APP_SERVO_MODE == APP_SERVO_DEMO)
   Servo_DemoUpdate();                   /* 在 1050~2400us 之间往复摆动 */
-#else
+#elif (APP_SERVO_MODE == APP_SERVO_BALL)
+  Ball_Update();                        /* 球杆闭环，内部只在新帧到达时动作 */
+#elif (APP_SERVO_MODE == APP_SERVO_MANUAL)
   /* KEY3/KEY4：舵机以最小步进(1us)增减脉宽，用来标定机构行程。
      用 Key_WasRepeated() 而不是 Key_WasPressed()：按住会连发，
      否则 1us 一步走完整个行程要按上千下。
@@ -647,7 +754,6 @@ void App_Run(void)
   {
     Servo_StepUs(-SERVO_STEP_US);
   }
-#endif
 #endif
 
   /* ---------- 任务层 + 循迹外环：每 2 拍 ---------- */
