@@ -155,13 +155,33 @@ void Ball_Update(void)
         }
         else if (!s_stick_armed)
         {
-          /* 等球真正停下来才重新武装。不加这个条件的话，球刚起步就会被
-             立刻重新加载补偿，等于一直踩着油门 */
-          if (fabsf(s_vel_cm_s) < BALL_STICTION_VEL_CMS)
+          /* closing > 0 表示球正在朝目标靠近(偏差在缩小)。
+             err>0 时目标在 x 增大方向，此时 vel>0 就是在靠近；err<0 反之 */
+          float closing = (err > 0.0f) ? s_vel_cm_s : -s_vel_cm_s;
+
+          /* 两道判据缺一不可：
+             1) 速度够低 —— 球真的停了才谈得上"卡住"
+             2) 没在朝目标滑 —— 补偿的职责是"卡住了推一把"，
+                不是给正在滑向目标的球加油
+
+             只有第 1 条会形成【棘轮】：撤销补偿的判据是"挪动 0.15cm"，
+             而挪完这 0.15cm 球速通常只有 2~3cm/s，仍低于 4cm/s 的门槛，
+             于是立刻重新武装、又给一次预载，如此反复 —— 等效于全程踩着
+             油门把球一路推过目标，表现就是在目标两侧来回摆荡。
+             门槛本身没法再往下压：它必须高于速度估计的噪声底(约 1.3cm/s)。
+             所以只能靠第 2 条从方向上把这个循环断掉。 */
+          if ((fabsf(s_vel_cm_s) < BALL_STICTION_VEL_CMS) &&
+              (closing < BALL_STICTION_APPROACH_CMS))
           {
             s_stick_armed = 1;
             s_stick_pos0  = s_pos_cm;
-            s_stiction_us = 0.0f;
+
+            /* 从预载值起爬而不是从 0：0~预载 这一段球必然不动，爬过它纯属
+               干等，而这段死时间正是最后 1cm 走得慢的原因。
+               "慢速逼近真实门槛"的性质由剩下那一段保留着。
+               预载是绝对值，不跟着天花板 BALL_STICTION_US 走 —— 两者的
+               取值方向相反，理由见 ball.h */
+            s_stiction_us = BALL_STICTION_PRELOAD_US;
           }
         }
         else if (fabsf(s_pos_cm - s_stick_pos0) > BALL_STICTION_MOVE_CM)
