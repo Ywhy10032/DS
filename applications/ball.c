@@ -121,10 +121,15 @@ void Ball_Update(void)
       }
       s_prev_pos_cm = s_pos_cm;
 
+      /* 偏差落进细调区没有？增益、摩擦前馈、补偿爬升速率【三样都】各有一套，
+         统一用这一个判据切换：赶路段要冲劲，细调段要每一脚都轻，
+         否则一脚就把球顶过目标 */
+      uint8_t in_fine = (fabsf(s_target_cm - s_pos_cm) <= BALL_COARSE_ERR_CM);
+
 #if BALL_GAIN_SCHEDULE
       /* 偏差大就换激进参数直接顶过静摩擦门槛，进细调区再切回温柔的那套。
          限幅不动 —— 它同时管着刹车权限，中途缩水会导致冲过头 */
-      if (fabsf(s_target_cm - s_pos_cm) > BALL_COARSE_ERR_CM)
+      if (!in_fine)
       {
         PID_SetTunings(&s_pid, BALL_COARSE_KP, 0.0f, BALL_COARSE_KD);
       }
@@ -139,6 +144,46 @@ void Ball_Update(void)
          幅度随帧率漂移 */
       s_pid.dt    = dt;
       s_output_us = PID_Update(&s_pid, s_target_cm, s_pos_cm);
+
+#if BALL_FRICTION_FF_ENABLE
+      /* ---------- 摩擦前馈 ---------- */
+      /* 把库仑摩擦从对象里"减掉"，PID 的输出就重新代表净推力，
+         不必再自己先挣出 160us 才开始干活。少了这一项，球必然停在
+         偏差 = 160/Kp 处开始爬行 —— 详见 ball.h */
+      {
+        float ff_err = s_target_cm - s_pos_cm;
+
+        /* 死区内不补：那是"已经到位、彻底撒手"的区域，
+           在这里叠推力就会把球顶出去，形成目标两侧的摆荡 */
+        if (fabsf(ff_err) > BALL_STICTION_ERR_CM)
+        {
+          /* 球跑起来就线性退出。补偿的职责只有帮球挣脱，
+             球在动时 D 项已经主导，再同向叠推力是跟刹车对着干 */
+          float fade = 1.0f - fabsf(s_vel_cm_s) / BALL_FRICTION_FF_FADE_CMS;
+
+          /* 细调区用更小的前馈：挣脱之后补偿撤销、前馈却留着，粗调区那
+             130us 加上比例项高于动摩擦，球会继续加速 —— 赶路段正需要，
+             到了目标附近就成了"微调幅度太大" */
+          float ff_us = in_fine ? BALL_FINE_FRICTION_FF_US : BALL_FRICTION_FF_US;
+
+          if (fade > 0.0f)
+          {
+            s_output_us += (ff_err > 0.0f) ? (ff_us * fade)
+                                           : (-ff_us * fade);
+
+            /* 叠加之后要重新限幅：PID_Update() 内部的限幅管不到这一项 */
+            if (s_output_us > BALL_OUTPUT_LIMIT_US)
+            {
+              s_output_us = BALL_OUTPUT_LIMIT_US;
+            }
+            else if (s_output_us < -BALL_OUTPUT_LIMIT_US)
+            {
+              s_output_us = -BALL_OUTPUT_LIMIT_US;
+            }
+          }
+        }
+      }
+#endif
 
 #if BALL_STICTION_ENABLE
       /* 静摩擦补偿：球几乎静止却仍有偏差时，逐步加大倾角直到它起步。
@@ -192,7 +237,10 @@ void Ball_Update(void)
         }
         else
         {
-          s_stiction_us += BALL_STICTION_RAMP_UPS * dt;
+          /* 细调区爬得更慢：爬升速率决定挣脱那一刻的倾角比真实门槛高出多少
+             (每帧涨 速率 x dt)，那点超出量就是"一脚踢多远"的主要来源 */
+          s_stiction_us += (in_fine ? BALL_FINE_RAMP_UPS
+                                    : BALL_STICTION_RAMP_UPS) * dt;
           if (s_stiction_us > BALL_STICTION_US)
           {
             s_stiction_us = BALL_STICTION_US;
