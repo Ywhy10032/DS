@@ -41,14 +41,6 @@ void Key_Scan(void);
 /* 取走一次"按下"事件(下降沿)，读到后自动清除，不会重复触发 */
 uint8_t Key_WasPressed(Key_ID id);
 
-/**
-  * @brief  取走一次"按下或连发"事件
-  * @note   与 Key_WasPressed() 各自维护事件位，互不影响：
-  *         切任务那种一次只该触发一次的用 WasPressed，
-  *         调参那种按住要连续走的用本函数。
-  */
-uint8_t Key_WasRepeated(Key_ID id);
-
 /* 当前是否按住 */
 uint8_t Key_IsDown(Key_ID id);
 
