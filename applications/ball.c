@@ -309,7 +309,7 @@ uint8_t Ball_IsTracking(void)
   *   只有当球总是稳定停在偏离目标几毫米的固定位置时才加，说明 SERVO_LEVEL_US
   *   不是真正的水平点。更好的做法是直接微调 SERVO_LEVEL_US，
   *   比用积分去补要干净 —— 积分在这种不稳定对象上很容易攒过头。
-  *   真要加就从 0.5 开始，并注意 BALL_INTEGRAL_LIMIT_US 已经限制在 60us。
+  *   真要加就从 0.5 开始，并注意 BALL_INTEGRAL_LIMIT_US 已经限制在 40us。
   *
   * 【关于噪声】
   *   Kd 直接放大视觉位置的抖动。如果舵机出现高频颤动而球其实是静止的，
