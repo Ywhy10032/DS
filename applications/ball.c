@@ -29,6 +29,10 @@ static float    s_stiction_us = 0.0f;   /* 静摩擦补偿的当前爬升值 */
 static uint8_t  s_stick_armed = 0;      /* 补偿是否已武装(球停稳且仍有偏差) */
 static float    s_stick_pos0  = 0.0f;   /* 武装那一刻的球位置，用来判断是否起步 */
 
+/* 增益调度当前所在的档位，带记忆(用于回差判定)，见 Ball_Update() 里的注释 */
+enum { BALL_BAND_COARSE = 0, BALL_BAND_FINE, BALL_BAND_MICRO };
+static uint8_t  s_band        = BALL_BAND_COARSE;
+
 static uint32_t s_last_frames = 0;      /* 上次处理到第几帧 */
 static uint32_t s_last_good_ms = 0;     /* 最近一次采纳帧的时刻 */
 static uint8_t  s_enabled     = 0;
@@ -52,6 +56,10 @@ static void Ball_GoLevel(void)
   s_vel_cm_s    = 0.0f;
   s_have_prev   = 0;
   s_tracking    = 0;
+
+  /* 档位状态也要清：不重置的话，重新使能时会带着上一轮结束时的档位起步——
+     若那时正停在微调档(小 Kp)而新目标离得很远，起步会软绵绵地慢半拍 */
+  s_band        = BALL_BAND_COARSE;
 }
 
 void Ball_Init(void)
@@ -131,12 +139,54 @@ void Ball_Update(void)
            微调  stiction_err_cm~micro_err_cm 目标附近摩擦通常更小，
                  细调那套"猛"增益用在这里就是粘滑振荡的根源(挣脱后动摩擦
                  更小，多出来的力变成净加速度，被大 Kd 一把刹回去，往复)
-         micro_err_cm=0 表示不启用微调档，退化成原来的两档 */
-      float   err_abs   = fabsf(s_target_cm - s_pos_cm);
-      uint8_t in_coarse = (err_abs > s_tune.coarse_err_cm);
-      uint8_t in_micro  = (!in_coarse) && (s_tune.micro_err_cm > 0.0f) &&
-                          (err_abs <= s_tune.micro_err_cm);
-      uint8_t in_fine   = (!in_coarse) && !in_micro;
+         micro_err_cm=0 表示不启用微调档，退化成原来的两档
+
+         带回差、按状态机判定，不是每帧纯按偏差重新算 —— 否则球贴在某个
+         边界附近时，位置噪声(0.1cm)就能让判定逐帧来回翻，每翻一次
+         Kp/Kd 就跳变一次，表现为"同样参数这次稳这次不稳"。进某一档和
+         退出该档故意用不同门限，球必须走过 2xHYST 才会换挡，见 ball.h
+         的 BALL_SCHEDULE_HYST_CM。s_band 的初值/复位见 Ball_GoLevel()。 */
+      {
+        float err_abs = fabsf(s_target_cm - s_pos_cm);
+
+        /* 粗调 <-> (细调/微调) 边界 */
+        if (s_band == BALL_BAND_COARSE)
+        {
+          if (err_abs <= (s_tune.coarse_err_cm - BALL_SCHEDULE_HYST_CM))
+          {
+            s_band = BALL_BAND_FINE;
+          }
+        }
+        else if (err_abs > (s_tune.coarse_err_cm + BALL_SCHEDULE_HYST_CM))
+        {
+          s_band = BALL_BAND_COARSE;
+        }
+
+        /* 细调 <-> 微调 边界，只在没被判成粗调、且微调档确实启用时才管 */
+        if ((s_band != BALL_BAND_COARSE) && (s_tune.micro_err_cm > 0.0f))
+        {
+          if (s_band == BALL_BAND_MICRO)
+          {
+            if (err_abs > (s_tune.micro_err_cm + BALL_SCHEDULE_HYST_CM))
+            {
+              s_band = BALL_BAND_FINE;
+            }
+          }
+          else if (err_abs <= (s_tune.micro_err_cm - BALL_SCHEDULE_HYST_CM))
+          {
+            s_band = BALL_BAND_MICRO;
+          }
+        }
+        else if (s_band == BALL_BAND_MICRO)
+        {
+          /* 微调档被关掉了(micro_err_cm<=0)，别停留在一个不存在的档位上 */
+          s_band = BALL_BAND_FINE;
+        }
+      }
+
+      uint8_t in_coarse = (s_band == BALL_BAND_COARSE);
+      uint8_t in_micro  = (s_band == BALL_BAND_MICRO);
+      uint8_t in_fine   = (s_band == BALL_BAND_FINE);
 
 #if BALL_GAIN_SCHEDULE
       /* 偏差大就换激进参数直接顶过静摩擦门槛，越靠近目标增益越温柔。

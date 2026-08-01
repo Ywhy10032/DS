@@ -192,7 +192,9 @@ static uint8_t  s_outer_cnt  = 0;
 static uint8_t  s_draw_cnt   = 0;
 static uint8_t  s_draw_field = 0;
 static uint8_t  s_time_cnt   = 0;
-static App_Page s_page       = APP_PAGE_MAIN;
+/* 开机默认停在球杆页 —— 现在主要在调球杆闭环，开机就要看的是 SET/POS/ERR，
+   省得每次上电先按一下 KEY3 翻页 */
+static App_Page s_page       = APP_PAGE_BALL;
 
 /**
   * @brief  当前页有几个数值字段
