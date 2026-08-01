@@ -153,6 +153,13 @@
 #define BALL_OUTPUT_SIGN        (+1.0f)
 
 /**
+  * 管子下垂的谷底位置(cm)。半圆剖开的 PPR 管自重下塌成浅谷，谷底就是
+  * SERVO_LEVEL_US 标定时球所在的那一点 —— 属于机构属性，不随任务变，
+  * 所以放在这里而不是参数组里。下垂的【强度】才是按任务给的：Ball_Tune.sag_us_per_cm
+  */
+#define BALL_SAG_CENTER_CM      12.5f
+
+/**
   * ---------------- 静摩擦补偿 ----------------
   *
   * 球从【静止】起步需要的倾角，远大于维持滚动需要的倾角。这正是
@@ -482,11 +489,47 @@ typedef struct
   float stiction_err_cm;            /* 死区：进来就彻底撒手 */
   float stiction_us;                /* 静摩擦补偿天花板 */
   float stiction_preload_us;        /* 静摩擦补偿起爬点 */
-  float ramp_ups, fine_ramp_ups;    /* 补偿爬升速率 */
+  float ramp_ups, fine_ramp_ups;    /* 补偿爬升速率(粗调/细调) */
+
+  /**
+    * ---------------- 微调档：细调和死区之间再插一层 ----------------
+    *
+    * 细调档(kp/kd/fine_friction_ff_us)是为了【冲过摩擦最大的那一段】调的——
+    * 5 点实测半宽最高到 150us，细调增益必须够猛才能顶过去。但目标本身往往
+    * 落在摩擦更小的地方(实测低到 110us)，同一套"猛"增益用在那里就是用力
+    * 过猛：一旦挣脱，动摩擦比静摩擦小，多出来的力变成净加速度，球被弹一下，
+    * 大 Kd 又把它使劲刹回来，来回振荡 —— 这是【粘滑】，不是没调好。
+    *
+    * micro_err_cm 划出最后一段专用的"只微调"区间(必须 > stiction_err_cm、
+    * < coarse_err_cm)，用远小于细调的增益、远小于细调的前馈、并且给补偿一个
+    * 更低的天花板和更慢的爬升 —— 每一脚都尽量贴着"刚好够走"，不是"确保冲过"。
+    *
+    * micro_err_cm = 0 表示不启用，行为和原来一样(只有粗调/细调两档)。
+    */
+  float micro_err_cm;
+  float micro_kp, micro_kd;
+  float micro_friction_ff_us;
+  float micro_stiction_us;            /* 微调档专用天花板，比细调档低很多 */
+  float micro_stiction_preload_us;    /* 微调档专用预载，必须低于最小实测半宽 */
+  float micro_ramp_ups;               /* 微调档专用爬升速率，比细调档慢很多 */
+
+  /**
+    * 下垂前馈强度(us 每 cm)。水平点不是常数：管子塌成浅谷，球偏离谷底越远，
+    * 脚下的局部坡度越大，需要的常驻倾角也越大。
+    *     实际水平点 = SERVO_LEVEL_US + sag_us_per_cm x (球位置 - BALL_SAG_CENTER_CM)
+    *
+    * 它【不影响稳定性】—— 静止带的宽度由摩擦决定，下垂动不了它。
+    * 它决定的是【球停在静止带的哪一端】：不补的话球会一直被推向谷底那一侧，
+    * 停在离目标偏中心的边缘上，表现为"差固定的一段距离到不了"。
+    *
+    * 0 = 关闭。只有需要把球停在【偏离谷底】的点上时才有意义 —— 任务四/五/六
+    * 的目标就是谷底(中心)，那里坡度为零，开不开都一样。
+    */
+  float sag_us_per_cm;
 } Ball_Tune;
 
 /* 默认值，就是上面那些宏 */
-#define BALL_TUNE_DEFAULT_INIT                                  {                                                                 BALL_KP, BALL_KI, BALL_KD,                                      BALL_COARSE_KP, BALL_COARSE_KD, BALL_COARSE_ERR_CM,             BALL_OUTPUT_LIMIT_US, BALL_INTEGRAL_LIMIT_US,                   BALL_FRICTION_FF_US, BALL_FINE_FRICTION_FF_US,                  BALL_FRICTION_FF_FADE_CMS,                                      BALL_STICTION_ERR_CM, BALL_STICTION_US,                         BALL_STICTION_PRELOAD_US,                                       BALL_STICTION_RAMP_UPS, BALL_FINE_RAMP_UPS                    }
+#define BALL_TUNE_DEFAULT_INIT                                  {                                                                 BALL_KP, BALL_KI, BALL_KD,                                      BALL_COARSE_KP, BALL_COARSE_KD, BALL_COARSE_ERR_CM,             BALL_OUTPUT_LIMIT_US, BALL_INTEGRAL_LIMIT_US,                   BALL_FRICTION_FF_US, BALL_FINE_FRICTION_FF_US,                  BALL_FRICTION_FF_FADE_CMS,                                      BALL_STICTION_ERR_CM, BALL_STICTION_US,                         BALL_STICTION_PRELOAD_US,                                       BALL_STICTION_RAMP_UPS, BALL_FINE_RAMP_UPS,                     0.0f,                                                           0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f                       }
 
 /* 装载一组参数。限幅会立即写进 PID，其余在下一帧生效 */
 void Ball_SetTune(const Ball_Tune *tune);

@@ -125,17 +125,29 @@ void Ball_Update(void)
       }
       s_prev_pos_cm = s_pos_cm;
 
-      /* 偏差落进细调区没有？增益、摩擦前馈、补偿爬升速率【三样都】各有一套，
-         统一用这一个判据切换：赶路段要冲劲，细调段要每一脚都轻，
-         否则一脚就把球顶过目标 */
-      uint8_t in_fine = (fabsf(s_target_cm - s_pos_cm) <= s_tune.coarse_err_cm);
+      /* 偏差落在哪一档？现在是三档：
+           粗调  >coarse_err_cm         冲刺，顶过静摩擦门槛
+           细调  micro_err_cm~coarse_err_cm   顶过管子上摩擦最大的那一段
+           微调  stiction_err_cm~micro_err_cm 目标附近摩擦通常更小，
+                 细调那套"猛"增益用在这里就是粘滑振荡的根源(挣脱后动摩擦
+                 更小，多出来的力变成净加速度，被大 Kd 一把刹回去，往复)
+         micro_err_cm=0 表示不启用微调档，退化成原来的两档 */
+      float   err_abs   = fabsf(s_target_cm - s_pos_cm);
+      uint8_t in_coarse = (err_abs > s_tune.coarse_err_cm);
+      uint8_t in_micro  = (!in_coarse) && (s_tune.micro_err_cm > 0.0f) &&
+                          (err_abs <= s_tune.micro_err_cm);
+      uint8_t in_fine   = (!in_coarse) && !in_micro;
 
 #if BALL_GAIN_SCHEDULE
-      /* 偏差大就换激进参数直接顶过静摩擦门槛，进细调区再切回温柔的那套。
+      /* 偏差大就换激进参数直接顶过静摩擦门槛，越靠近目标增益越温柔。
          限幅不动 —— 它同时管着刹车权限，中途缩水会导致冲过头 */
-      if (!in_fine)
+      if (in_coarse)
       {
         PID_SetTunings(&s_pid, s_tune.coarse_kp, 0.0f, s_tune.coarse_kd);
+      }
+      else if (in_micro)
+      {
+        PID_SetTunings(&s_pid, s_tune.micro_kp, s_tune.ki, s_tune.micro_kd);
       }
       else
       {
@@ -165,10 +177,12 @@ void Ball_Update(void)
              球在动时 D 项已经主导，再同向叠推力是跟刹车对着干 */
           float fade = 1.0f - fabsf(s_vel_cm_s) / s_tune.ff_fade_cms;
 
-          /* 细调区用更小的前馈：挣脱之后补偿撤销、前馈却留着，粗调区那
-             130us 加上比例项高于动摩擦，球会继续加速 —— 赶路段正需要，
-             到了目标附近就成了"微调幅度太大" */
-          float ff_us = in_fine ? s_tune.fine_friction_ff_us : s_tune.friction_ff_us;
+          /* 越靠近目标前馈越小：挣脱之后补偿撤销、前馈却留着，粗调区那份
+             前馈加上比例项高于动摩擦，球会继续加速 —— 赶路段正需要，
+             到了目标附近就成了"微调幅度太大"，微调档因此比细调档更小 */
+          float ff_us = in_micro ? s_tune.micro_friction_ff_us
+                       : in_fine  ? s_tune.fine_friction_ff_us
+                                  : s_tune.friction_ff_us;
 
           if (fade > 0.0f)
           {
@@ -230,7 +244,10 @@ void Ball_Update(void)
                "慢速逼近真实门槛"的性质由剩下那一段保留着。
                预载是绝对值，不跟着天花板 BALL_STICTION_US 走 —— 两者的
                取值方向相反，理由见 ball.h */
-            s_stiction_us = s_tune.stiction_preload_us;
+            /* 微调档用自己的预载(必须低于目标附近实测的最小半宽)，
+               不然武装的第一下就可能已经超过门槛，等于没有"微调"这一说 */
+            s_stiction_us = in_micro ? s_tune.micro_stiction_preload_us
+                                     : s_tune.stiction_preload_us;
           }
         }
         else if (fabsf(s_pos_cm - s_stick_pos0) > BALL_STICTION_MOVE_CM)
@@ -241,13 +258,18 @@ void Ball_Update(void)
         }
         else
         {
-          /* 细调区爬得更慢：爬升速率决定挣脱那一刻的倾角比真实门槛高出多少
-             (每帧涨 速率 x dt)，那点超出量就是"一脚踢多远"的主要来源 */
-          s_stiction_us += (in_fine ? s_tune.fine_ramp_ups
-                                    : s_tune.ramp_ups) * dt;
-          if (s_stiction_us > s_tune.stiction_us)
+          /* 越靠近目标爬得越慢：爬升速率决定挣脱那一刻的倾角比真实门槛
+             高出多少(每帧涨 速率 x dt)，那点超出量就是"一脚踢多远"的
+             主要来源 —— 微调档的爬升速率要比细调档更慢 */
+          float ramp = in_micro ? s_tune.micro_ramp_ups
+                      : in_fine  ? s_tune.fine_ramp_ups
+                                 : s_tune.ramp_ups;
+          float ceiling = in_micro ? s_tune.micro_stiction_us : s_tune.stiction_us;
+
+          s_stiction_us += ramp * dt;
+          if (s_stiction_us > ceiling)
           {
-            s_stiction_us = s_tune.stiction_us;
+            s_stiction_us = ceiling;
           }
 
           /* 只在 PID 自己给不出这么大幅度时才顶上去 */
@@ -275,7 +297,14 @@ void Ball_Update(void)
         out -= BALL_FF_CURVE_GAIN * s_curve_ff;
 #endif
 
-        Servo_SetPulseUs((uint16_t)(SERVO_LEVEL_US +
+        /* 下垂前馈：水平点随【球所在位置】线性变化，把管子那段局部坡度
+           开环抵消掉。PD 在零误差处输出为零、积分又太慢，都给不出这个常驻
+           倾角 —— 不补的话球会一直贴在静止带靠谷底那一侧的边缘。
+           用 s_pos_cm 而非 s_target_cm：球感受到的是它当前脚下的坡度。 */
+        float level_us = (float)SERVO_LEVEL_US
+                         + s_tune.sag_us_per_cm * (s_pos_cm - BALL_SAG_CENTER_CM);
+
+        Servo_SetPulseUs((uint16_t)(level_us +
                                     (int16_t)(BALL_OUTPUT_SIGN * out)));
       }
       s_tracking = 1;

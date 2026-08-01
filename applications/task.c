@@ -165,12 +165,21 @@ static void Task_Start(void)
        一套参数满足不了两边 —— 各项取值与理由见 task.h 的 TASK3_BALL_* */
     Ball_Tune tune = BALL_TUNE_DEFAULT_INIT;
 
+    tune.sag_us_per_cm      = TASK3_BALL_SAG_US_PER_CM;
     tune.kp                 = TASK3_BALL_FINE_KP;
     tune.kd                 = TASK3_BALL_FINE_KD;
     tune.coarse_kd          = TASK3_BALL_COARSE_KD;
     tune.coarse_err_cm      = TASK3_BALL_COARSE_ERR_CM;
     tune.stiction_us        = TASK3_BALL_STICTION_US;
     tune.stiction_err_cm    = TASK3_BALL_STICTION_ERR_CM;
+
+    tune.micro_err_cm             = TASK3_BALL_MICRO_ERR_CM;
+    tune.micro_kp                 = TASK3_BALL_MICRO_KP;
+    tune.micro_kd                 = TASK3_BALL_MICRO_KD;
+    tune.micro_friction_ff_us     = TASK3_BALL_MICRO_FRICTION_FF_US;
+    tune.micro_stiction_us        = TASK3_BALL_MICRO_STICTION_US;
+    tune.micro_stiction_preload_us = TASK3_BALL_MICRO_STICTION_PRELOAD_US;
+    tune.micro_ramp_ups           = TASK3_BALL_MICRO_RAMP_UPS;
     tune.fine_friction_ff_us = TASK3_BALL_FINE_FF_US;
     tune.ff_fade_cms        = TASK3_BALL_FF_FADE_CMS;
 
