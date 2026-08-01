@@ -141,6 +141,11 @@ static void Task_Start(void)
      用着上一个任务残留的加速度值，把杆莫名其妙地倾着 */
   Ball_SetAccelFF(0.0f);
 
+  /* 球杆参数先恢复默认，下面哪个任务需要专用的一组就自己覆盖 ——
+     否则跑完任务三再切别的任务，会带着任务三那套"到位就撒手"的参数，
+     而载球行驶恰恰需要一直修正 */
+  Ball_ResetTune();
+
   /* 任务一：车不动，只让舵机在标定出的机构安全行程内往复摆动，
      用来验收行程、方向和连杆装配。球杆闭环先摘掉 —— 它和摆动演示都在
      每拍写脉宽，同时开就是互相抢舵机 */
@@ -155,6 +160,22 @@ static void Task_Start(void)
   /* 任务三：车不动，摆杆先把球送到 +5cm */
   else if (s_task == TASK_3)
   {
+    /* 装载任务三专用的球杆参数。任务三要"冲得快 + 到位后彻底撒手"，
+       和载球行驶(任务四/五/六)那种"稳在中心、抗车体扰动"的要求是冲突的，
+       一套参数满足不了两边 —— 各项取值与理由见 task.h 的 TASK3_BALL_* */
+    Ball_Tune tune = BALL_TUNE_DEFAULT_INIT;
+
+    tune.kp                 = TASK3_BALL_FINE_KP;
+    tune.kd                 = TASK3_BALL_FINE_KD;
+    tune.coarse_kd          = TASK3_BALL_COARSE_KD;
+    tune.coarse_err_cm      = TASK3_BALL_COARSE_ERR_CM;
+    tune.stiction_us        = TASK3_BALL_STICTION_US;
+    tune.stiction_err_cm    = TASK3_BALL_STICTION_ERR_CM;
+    tune.fine_friction_ff_us = TASK3_BALL_FINE_FF_US;
+    tune.ff_fade_cms        = TASK3_BALL_FF_FADE_CMS;
+
+    Ball_SetTune(&tune);
+
     s_t3_phase     = TASK3_GO_PLUS;
     s_t3_settle_ms = HAL_GetTick();
 

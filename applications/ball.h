@@ -446,6 +446,54 @@ void Ball_SetAccelFF(float rpm_per_s);
 #define BALL_DT_MIN_S           0.010f
 #define BALL_DT_MAX_S           0.150f
 
+/**
+  ******************************************************************************
+  * ---------------- 按任务切换的参数组 ----------------
+  *
+  * 上面那些 #define 是【默认值】，各任务对球杆的要求并不相同：
+  *   任务三  球要在 +-5cm 两个偏离中心的点上停住，且限时 5 秒 —— 要快、
+  *           要能在目标附近彻底撒手(靠死区吃掉静摩擦造成的残差)
+  *   任务四/五/六  球只要稳在中心，但小车在跑，要抗住加减速和过弯的扰动
+  *
+  * 拿一套参数同时满足两者是做不到的，所以做成运行时可切换：任务层在
+  * Task_Start() 里按任务号装载对应的一组，见 task.h 的 TASK3_BALL_*。
+  *
+  * ---------------- 哪些进来、哪些不进来 ----------------
+  * 进来的是【控制行为】—— 增益、前馈力度、死区宽度，这些取决于任务目标。
+  * 不进来的是【传感器与机构的固有属性】—— BALL_STICTION_MOVE_CM(位置噪声)、
+  * BALL_STICTION_VEL_CMS / BALL_STICTION_APPROACH_CMS(速度噪声底)、
+  * BALL_VEL_LPF、BALL_MIN_CONFIDENCE。这些是硬件决定的，换任务不会变，
+  * 放进来只会多出几个永远不该动的旋钮。
+  ******************************************************************************
+  */
+typedef struct
+{
+  float kp, ki, kd;                 /* 细调区(偏差 <= coarse_err_cm) */
+  float coarse_kp, coarse_kd;       /* 粗调区，Ki 恒为 0 */
+  float coarse_err_cm;              /* 粗/细调的分界 */
+
+  float out_limit_us;               /* 输出限幅 */
+  float integral_limit_us;
+
+  float friction_ff_us;             /* 摩擦前馈：粗调区 */
+  float fine_friction_ff_us;        /* 摩擦前馈：细调区 */
+  float ff_fade_cms;                /* 球速到此值时前馈退完 */
+
+  float stiction_err_cm;            /* 死区：进来就彻底撒手 */
+  float stiction_us;                /* 静摩擦补偿天花板 */
+  float stiction_preload_us;        /* 静摩擦补偿起爬点 */
+  float ramp_ups, fine_ramp_ups;    /* 补偿爬升速率 */
+} Ball_Tune;
+
+/* 默认值，就是上面那些宏 */
+#define BALL_TUNE_DEFAULT_INIT                                  {                                                                 BALL_KP, BALL_KI, BALL_KD,                                      BALL_COARSE_KP, BALL_COARSE_KD, BALL_COARSE_ERR_CM,             BALL_OUTPUT_LIMIT_US, BALL_INTEGRAL_LIMIT_US,                   BALL_FRICTION_FF_US, BALL_FINE_FRICTION_FF_US,                  BALL_FRICTION_FF_FADE_CMS,                                      BALL_STICTION_ERR_CM, BALL_STICTION_US,                         BALL_STICTION_PRELOAD_US,                                       BALL_STICTION_RAMP_UPS, BALL_FINE_RAMP_UPS                    }
+
+/* 装载一组参数。限幅会立即写进 PID，其余在下一帧生效 */
+void Ball_SetTune(const Ball_Tune *tune);
+
+/* 回到宏定义的默认值 */
+void Ball_ResetTune(void);
+
 /* ================= 接口 ================= */
 
 /* 初始化，须在 Servo_Init() / Vision_Init() 之后调用 */

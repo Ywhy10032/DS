@@ -11,9 +11,13 @@
 #include "pid.h"
 
 #include <math.h>
+#include <stddef.h>
 
 /* ---------------- 运行时状态 ---------------- */
 static PID_Controller s_pid;
+
+/* 当前生效的参数组。任务层用 Ball_SetTune() 切换，见 ball.h */
+static Ball_Tune s_tune = BALL_TUNE_DEFAULT_INIT;
 
 static float    s_target_cm   = BALL_TARGET_CM;
 static float    s_pos_cm      = BALL_TARGET_CM;
@@ -52,9 +56,9 @@ static void Ball_GoLevel(void)
 
 void Ball_Init(void)
 {
-  PID_Init(&s_pid, BALL_KP, BALL_KI, BALL_KD, BALL_DT_MAX_S);
-  PID_SetOutputLimits(&s_pid, -BALL_OUTPUT_LIMIT_US, BALL_OUTPUT_LIMIT_US);
-  PID_SetIntegralLimit(&s_pid, BALL_INTEGRAL_LIMIT_US);
+  PID_Init(&s_pid, s_tune.kp, s_tune.ki, s_tune.kd, BALL_DT_MAX_S);
+  PID_SetOutputLimits(&s_pid, -s_tune.out_limit_us, s_tune.out_limit_us);
+  PID_SetIntegralLimit(&s_pid, s_tune.integral_limit_us);
 
   s_target_cm    = BALL_TARGET_CM;
   s_pos_cm       = BALL_TARGET_CM;
@@ -124,18 +128,18 @@ void Ball_Update(void)
       /* 偏差落进细调区没有？增益、摩擦前馈、补偿爬升速率【三样都】各有一套，
          统一用这一个判据切换：赶路段要冲劲，细调段要每一脚都轻，
          否则一脚就把球顶过目标 */
-      uint8_t in_fine = (fabsf(s_target_cm - s_pos_cm) <= BALL_COARSE_ERR_CM);
+      uint8_t in_fine = (fabsf(s_target_cm - s_pos_cm) <= s_tune.coarse_err_cm);
 
 #if BALL_GAIN_SCHEDULE
       /* 偏差大就换激进参数直接顶过静摩擦门槛，进细调区再切回温柔的那套。
          限幅不动 —— 它同时管着刹车权限，中途缩水会导致冲过头 */
       if (!in_fine)
       {
-        PID_SetTunings(&s_pid, BALL_COARSE_KP, 0.0f, BALL_COARSE_KD);
+        PID_SetTunings(&s_pid, s_tune.coarse_kp, 0.0f, s_tune.coarse_kd);
       }
       else
       {
-        PID_SetTunings(&s_pid, BALL_KP, BALL_KI, BALL_KD);
+        PID_SetTunings(&s_pid, s_tune.kp, s_tune.ki, s_tune.kd);
       }
 #endif
 
@@ -155,16 +159,16 @@ void Ball_Update(void)
 
         /* 死区内不补：那是"已经到位、彻底撒手"的区域，
            在这里叠推力就会把球顶出去，形成目标两侧的摆荡 */
-        if (fabsf(ff_err) > BALL_STICTION_ERR_CM)
+        if (fabsf(ff_err) > s_tune.stiction_err_cm)
         {
           /* 球跑起来就线性退出。补偿的职责只有帮球挣脱，
              球在动时 D 项已经主导，再同向叠推力是跟刹车对着干 */
-          float fade = 1.0f - fabsf(s_vel_cm_s) / BALL_FRICTION_FF_FADE_CMS;
+          float fade = 1.0f - fabsf(s_vel_cm_s) / s_tune.ff_fade_cms;
 
           /* 细调区用更小的前馈：挣脱之后补偿撤销、前馈却留着，粗调区那
              130us 加上比例项高于动摩擦，球会继续加速 —— 赶路段正需要，
              到了目标附近就成了"微调幅度太大" */
-          float ff_us = in_fine ? BALL_FINE_FRICTION_FF_US : BALL_FRICTION_FF_US;
+          float ff_us = in_fine ? s_tune.fine_friction_ff_us : s_tune.friction_ff_us;
 
           if (fade > 0.0f)
           {
@@ -172,13 +176,13 @@ void Ball_Update(void)
                                            : (-ff_us * fade);
 
             /* 叠加之后要重新限幅：PID_Update() 内部的限幅管不到这一项 */
-            if (s_output_us > BALL_OUTPUT_LIMIT_US)
+            if (s_output_us > s_tune.out_limit_us)
             {
-              s_output_us = BALL_OUTPUT_LIMIT_US;
+              s_output_us = s_tune.out_limit_us;
             }
-            else if (s_output_us < -BALL_OUTPUT_LIMIT_US)
+            else if (s_output_us < -s_tune.out_limit_us)
             {
-              s_output_us = -BALL_OUTPUT_LIMIT_US;
+              s_output_us = -s_tune.out_limit_us;
             }
           }
         }
@@ -192,7 +196,7 @@ void Ball_Update(void)
       {
         float err = s_target_cm - s_pos_cm;
 
-        if (fabsf(err) <= BALL_STICTION_ERR_CM)
+        if (fabsf(err) <= s_tune.stiction_err_cm)
         {
           /* 已经到位，不折腾 */
           s_stick_armed = 0;
@@ -226,7 +230,7 @@ void Ball_Update(void)
                "慢速逼近真实门槛"的性质由剩下那一段保留着。
                预载是绝对值，不跟着天花板 BALL_STICTION_US 走 —— 两者的
                取值方向相反，理由见 ball.h */
-            s_stiction_us = BALL_STICTION_PRELOAD_US;
+            s_stiction_us = s_tune.stiction_preload_us;
           }
         }
         else if (fabsf(s_pos_cm - s_stick_pos0) > BALL_STICTION_MOVE_CM)
@@ -239,11 +243,11 @@ void Ball_Update(void)
         {
           /* 细调区爬得更慢：爬升速率决定挣脱那一刻的倾角比真实门槛高出多少
              (每帧涨 速率 x dt)，那点超出量就是"一脚踢多远"的主要来源 */
-          s_stiction_us += (in_fine ? BALL_FINE_RAMP_UPS
-                                    : BALL_STICTION_RAMP_UPS) * dt;
-          if (s_stiction_us > BALL_STICTION_US)
+          s_stiction_us += (in_fine ? s_tune.fine_ramp_ups
+                                    : s_tune.ramp_ups) * dt;
+          if (s_stiction_us > s_tune.stiction_us)
           {
-            s_stiction_us = BALL_STICTION_US;
+            s_stiction_us = s_tune.stiction_us;
           }
 
           /* 只在 PID 自己给不出这么大幅度时才顶上去 */
@@ -283,6 +287,28 @@ void Ball_Update(void)
   {
     Ball_GoLevel();
   }
+}
+
+void Ball_SetTune(const Ball_Tune *tune)
+{
+  if (tune == NULL)
+  {
+    return;
+  }
+
+  s_tune = *tune;
+
+  /* 限幅存在 PID 内部，必须立刻同步；kp/ki/kd 每帧都会被增益调度重写，
+     不用在这里管 */
+  PID_SetOutputLimits(&s_pid, -s_tune.out_limit_us, s_tune.out_limit_us);
+  PID_SetIntegralLimit(&s_pid, s_tune.integral_limit_us);
+}
+
+void Ball_ResetTune(void)
+{
+  const Ball_Tune def = BALL_TUNE_DEFAULT_INIT;
+
+  Ball_SetTune(&def);
 }
 
 void Ball_Enable(uint8_t on)
