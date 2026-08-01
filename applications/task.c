@@ -293,7 +293,12 @@ static void Task3_Run(void)
       if (err <= TASK3_ARRIVE_CM)
       {
         s_t3_phase = TASK3_GO_MINUS;
-        Ball_SetTarget(TASK3_MINUS_CM);
+        /* 下发的是带瞄准偏置的目标，不是真实的 -5cm —— 见 task.h 的
+           TASK3_MINUS_AIM_CM。折返判据(err<=ARRIVE_CM)也会跟着用这个偏置
+           目标算，等于把"到位"的判定线也一起挪了 0.5cm，这正是需要的效果：
+           不这样挪的话，折返/稳定判定还是按真实 7.5 算，球停在偏置后的位置
+           时反而会被判成"没到位"而一直不结束。 */
+        Ball_SetTarget(TASK3_MINUS_AIM_CM);
       }
       break;
 
