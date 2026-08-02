@@ -128,6 +128,33 @@ static uint8_t Vofa_ParseLine(const char *line)
       return 1;
     }
 
+    case 'L':
+    {
+      /* 舵机输出总限幅(us)，见 ball.h 的 BALL_OUTPUT_LIMIT_US ——
+         摩擦增大(灰尘)时球卡在这个天花板推不动，就调它 */
+      Ball_Tune tune  = Ball_GetTune();
+      float     limit = strtof(p, &end);
+
+      if (end == p) { return 0; }
+      tune.out_limit_us = limit;
+      Ball_SetTune(&tune);
+      return 1;
+    }
+
+    case 'I':
+    {
+      /* 速度环积分限幅(us)，见 ball.h 的 BALL_VEL_I_LIMIT_US ——
+         和 L 是一对：I 必须比 L 留出比例项的余量，否则积分总被比例项
+         挤没，摩擦一增大就先卡死 */
+      Ball_Tune tune  = Ball_GetTune();
+      float     limit = strtof(p, &end);
+
+      if (end == p) { return 0; }
+      tune.vel_i_limit_us = limit;
+      Ball_SetTune(&tune);
+      return 1;
+    }
+
     case 'R':
       Ball_ResetTune();
       return 1;

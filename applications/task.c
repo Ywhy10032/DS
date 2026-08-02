@@ -43,6 +43,7 @@ typedef enum
 
 static Task3_Phase s_t3_phase    = TASK3_GO_PLUS;
 static uint32_t    s_t3_settle_ms = 0;       /* 进入容差圈的时刻 */
+static uint32_t    s_t3_arrive_ms = 0;       /* GO_PLUS 阶段进入位置容差圈的时刻，0=还没进 */
 
 /* 任务一：进入前球杆闭环是否开着，结束时原样还回去。
    舵机脉宽只有一个出口，摆动演示跑起来时球杆闭环必须让位，
@@ -170,6 +171,7 @@ static void Task_Start(void)
 
     s_t3_phase     = TASK3_GO_PLUS;
     s_t3_settle_ms = HAL_GetTick();
+    s_t3_arrive_ms = 0;
 
     Track_SetBaseSpeed(0.0f);
     Ball_SetTarget(TASK3_PLUS_CM);
@@ -262,9 +264,11 @@ static void Task2_Run(void)
 
 /**
   * @brief  任务三：小车静止，摆杆把球送到 +5cm、折返、再送到 -5cm 并稳住
-  * @note   到达 +5cm 时【不停留】直接换目标。5 秒要走完 15cm，等球在 +5cm
-  *         彻底停稳会白白吃掉一两秒；而规则只要求"够到 ±5cm 附近"，
-  *         一进容差圈就折返，控制器会立刻反向刹车，冲过的那点余量仍在 1cm 内。
+  * @note   到达 +5cm 时不做完整停稳，但也不能【完全不管速度】就立刻折返——
+  *         实测 4 次真实任务三，3 次超过 5s，波形显示是折返时球还带着明显
+  *         速度，反向的目标叠加原有动能，冲得更远、荡得更久，时间大头花在
+  *         折返后的振荡拖尾上，不是花在赶路上。改成"位置够近 且 速度够慢"
+  *         才折返，用 TASK3_REVERSE_WAIT_MAX_MS 兜底避免极端情况下等不到。
   */
 static void Task3_Run(void)
 {
@@ -273,7 +277,21 @@ static void Task3_Run(void)
   switch (s_t3_phase)
   {
     case TASK3_GO_PLUS:
-      if (err <= TASK3_ARRIVE_CM)
+    {
+      uint8_t pos_ok = (err <= TASK3_ARRIVE_CM);
+
+      if (!pos_ok)
+      {
+        s_t3_arrive_ms = 0;      /* 还没到容差圈，清零 */
+      }
+      else if (s_t3_arrive_ms == 0U)
+      {
+        s_t3_arrive_ms = HAL_GetTick();    /* 刚进容差圈，记下时刻 */
+      }
+
+      if (pos_ok &&
+          ((fabsf(Ball_GetVelCmS()) <= TASK3_REVERSE_VEL_CMS) ||
+           ((HAL_GetTick() - s_t3_arrive_ms) >= TASK3_REVERSE_WAIT_MAX_MS)))
       {
         s_t3_phase = TASK3_GO_MINUS;
         /* 串级下不再需要瞄准偏置去补稳态残差 —— 那是速度环积分的职责，
@@ -281,6 +299,7 @@ static void Task3_Run(void)
         Ball_SetTarget(TASK3_MINUS_CM);
       }
       break;
+    }
 
     case TASK3_GO_MINUS:
       if (err <= TASK3_ARRIVE_CM)
