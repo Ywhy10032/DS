@@ -32,6 +32,23 @@ typedef struct
   float   out_max;
   float   integral_limit;     /* 积分项(ki*integral)的幅值上限 */
 
+  /**
+    * 积分死区：|error| 小于这个值时，积分【冻结】——本拍不再累加，
+    * 也不清零，就停在上一次的值上。
+    *
+    * 用途：对象带静摩擦这类死区非线性时，纯积分会在目标附近产生一个
+    * 缓慢的极限环——噪声让 error 在 0 附近正负跳动，积分本该正负抵消，
+    * 但只要有一点点系统性偏置(残余坡度、水平点误差)，积分就会朝一个
+    * 方向缓慢"充电"，充到越过静摩擦门槛就把对象猛地推动一下，冲过头，
+    * 反向修正，重新稳住，然后再次缓慢充电……表现为"稳一会儿、抖一下、
+    * 又稳住"周期性发作。加了死区之后，噪声量级的误差不再喂给积分，
+    * 它就稳稳停在"刚好顶住恒定阻力"的那个值上不再乱走；真正的扰动
+    * (幅度明显大于噪声)照常被积分吸收，不受影响。
+    *
+    * 0 = 关闭(默认)，不影响原有任何行为。
+    */
+  float   integral_deadband;
+
   uint8_t first_run;          /* 首次运行时跳过微分，避免开机尖峰 */
 } PID_Controller;
 
@@ -43,6 +60,9 @@ void  PID_SetOutputLimits(PID_Controller *pid, float min, float max);
 
 /* 积分项限幅，建议取输出量程的 50%~70%，给 P 留出响应余量 */
 void  PID_SetIntegralLimit(PID_Controller *pid, float limit);
+
+/* 积分死区，见结构体字段注释。0 = 关闭 */
+void  PID_SetIntegralDeadband(PID_Controller *pid, float deadband);
 
 /* 在线改参数，不影响已累积的积分 */
 void  PID_SetTunings(PID_Controller *pid, float kp, float ki, float kd);

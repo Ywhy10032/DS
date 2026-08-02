@@ -63,6 +63,7 @@ static void Ball_ApplyLimits(void)
 
   PID_SetOutputLimits(&s_vel_pid, -s_tune.out_limit_us, s_tune.out_limit_us);
   PID_SetIntegralLimit(&s_vel_pid, s_tune.vel_i_limit_us);
+  PID_SetIntegralDeadband(&s_vel_pid, s_tune.vel_i_deadband_cms);
 }
 
 /**

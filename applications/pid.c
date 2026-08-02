@@ -7,6 +7,8 @@
 
 #include "pid.h"
 
+#include <math.h>
+
 void PID_Init(PID_Controller *pid, float kp, float ki, float kd, float dt)
 {
   pid->kp = kp;
@@ -14,9 +16,10 @@ void PID_Init(PID_Controller *pid, float kp, float ki, float kd, float dt)
   pid->kd = kd;
   pid->dt = dt;
 
-  pid->out_min        = -1000.0f;
-  pid->out_max        =  1000.0f;
-  pid->integral_limit =  1000.0f;
+  pid->out_min           = -1000.0f;
+  pid->out_max           =  1000.0f;
+  pid->integral_limit    =  1000.0f;
+  pid->integral_deadband =     0.0f;   /* 默认关闭，不改变现有行为 */
 
   PID_Reset(pid);
 }
@@ -30,6 +33,11 @@ void PID_SetOutputLimits(PID_Controller *pid, float min, float max)
 void PID_SetIntegralLimit(PID_Controller *pid, float limit)
 {
   pid->integral_limit = limit;
+}
+
+void PID_SetIntegralDeadband(PID_Controller *pid, float deadband)
+{
+  pid->integral_deadband = deadband;
 }
 
 void PID_SetTunings(PID_Controller *pid, float kp, float ki, float kd)
@@ -57,22 +65,29 @@ float PID_Update(PID_Controller *pid, float setpoint, float measurement)
   /* ---------- 比例 ---------- */
   p_term = pid->kp * error;
 
-  /* ---------- 积分（带抗饱和限幅） ---------- */
+  /* ---------- 积分（带抗饱和限幅 + 死区） ---------- */
   if (pid->ki > 1e-6f)
   {
-    float integral_max;
-
-    pid->integral += error * pid->dt;
-
-    /* 限幅是对积分【项】(ki*integral)做的，这样改 Ki 时限幅含义不变 */
-    integral_max = pid->integral_limit / pid->ki;
-    if (pid->integral > integral_max)
+    /* 死区内不累加：噪声量级的误差不该继续推动积分乱走，否则会在死区
+       非线性(如静摩擦)附近产生缓慢的"充电-越界-冲过头-回落"极限环。
+       积分就停在原值上，不清零——它可能正憋着顶住恒定阻力所需的量，
+       清零反而会立刻丢掉这份补偿 */
+    if (fabsf(error) >= pid->integral_deadband)
     {
-      pid->integral = integral_max;
-    }
-    else if (pid->integral < -integral_max)
-    {
-      pid->integral = -integral_max;
+      float integral_max;
+
+      pid->integral += error * pid->dt;
+
+      /* 限幅是对积分【项】(ki*integral)做的，这样改 Ki 时限幅含义不变 */
+      integral_max = pid->integral_limit / pid->ki;
+      if (pid->integral > integral_max)
+      {
+        pid->integral = integral_max;
+      }
+      else if (pid->integral < -integral_max)
+      {
+        pid->integral = -integral_max;
+      }
     }
   }
   else

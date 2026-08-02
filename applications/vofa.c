@@ -115,6 +115,19 @@ static uint8_t Vofa_ParseLine(const char *line)
       return 1;
     }
 
+    case 'D':
+    {
+      /* 速度环积分死区(cm/s)，见 ball.h 的 BALL_VEL_I_DEADBAND_CMS ——
+         专治"稳一会儿、抖一下、又稳住"周期性发作 */
+      Ball_Tune tune = Ball_GetTune();
+      float     cms  = strtof(p, &end);
+
+      if (end == p) { return 0; }
+      tune.vel_i_deadband_cms = cms;
+      Ball_SetTune(&tune);
+      return 1;
+    }
+
     case 'R':
       Ball_ResetTune();
       return 1;
