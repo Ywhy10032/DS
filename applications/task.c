@@ -297,6 +297,16 @@ static void Task3_Run(void)
         /* 串级下不再需要瞄准偏置去补稳态残差 —— 那是速度环积分的职责，
            这里直接下发真实的 -5cm */
         Ball_SetTarget(TASK3_MINUS_CM);
+
+        /* 只在这一刻单独调高外环 Kd，只影响 GO_MINUS(以及紧接着的
+           SETTLING)阶段 —— GO_PLUS 阶段用的那组 tune 已经跑完，
+           不会再被这次覆盖影响到 */
+        {
+          Ball_Tune tune = Ball_GetTune();
+
+          tune.pos_kd = TASK3_BALL_MINUS_POS_KD;
+          Ball_SetTune(&tune);
+        }
       }
       break;
     }
