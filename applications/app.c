@@ -23,6 +23,7 @@
 #include "servo.h"
 #include "vision.h"
 #include "ball.h"
+#include "vofa.h"
 
 #include <math.h>
 
@@ -102,7 +103,7 @@
 typedef enum
 {
   APP_PAGE_MAIN = 0,      /* 循迹主界面 */
-  APP_PAGE_VISION,        /* 视觉模块原始数据 */
+  APP_PAGE_PID,           /* 球杆闭环当前生效的六个 PID 增益 */
   APP_PAGE_BALL,          /* 球杆闭环 */
   APP_PAGE_NUM
 } App_Page;
@@ -122,23 +123,24 @@ typedef enum
 #define APP_FIELD_DIST      (GRAY_CHANNEL_NUM + 4)
 #define APP_FIELD_SERVO     (GRAY_CHANNEL_NUM + 5)
 
-/* ---------------- 视觉页 ---------------- */
+/* ---------------- PID 页 ---------------- */
+/* 坐标常量沿用原视觉页的布局位置，改名字太费事、纯几何数值与"视觉"无关 */
 #define APP_VIS_Y0          52
 #define APP_VIS_DY          32
 #define APP_VIS_VALUE_X     (APP_LABEL_X + 6 * APP_FONT_W)
 #define APP_VIS_VALUE_LEN   8
 
+/* 显示当前生效的 Ball_Tune 六个增益 —— 与 vofa.c 的 O/P 指令改的是同一组数，
+   方便现场核对远程调参是否真的生效 */
 enum
 {
-  APP_VIS_X = 0,          /* 沿摆杆轴线的位置 cm */
-  APP_VIS_VX,             /* 横向像素速度 */
-  APP_VIS_CONF,           /* YOLO 置信度 */
-  APP_VIS_TS,             /* 视觉端时间戳 */
-  APP_VIS_FRAMES,         /* 累计收到的帧数 */
-  APP_VIS_ERR,            /* 解析失败 + 串口错误 */
-  APP_VIS_AGE,            /* 距上一帧多久 */
-  APP_VIS_LINK,           /* 链路是否新鲜 */
-  APP_VISION_FIELD_NUM
+  APP_PID_POS_KP = 0,     /* 位置环(外环) Kp */
+  APP_PID_POS_KI,         /* 位置环(外环) Ki */
+  APP_PID_POS_KD,         /* 位置环(外环) Kd */
+  APP_PID_VEL_KP,         /* 速度环(内环) Kp */
+  APP_PID_VEL_KI,         /* 速度环(内环) Ki */
+  APP_PID_VEL_KD,         /* 速度环(内环) Kd */
+  APP_PID_FIELD_NUM
 };
 
 /* ---------------- 球杆页 ---------------- */
@@ -147,8 +149,9 @@ enum
   APP_BALL_SET = 0,       /* 目标位置 cm */
   APP_BALL_POS,           /* 实测位置 cm */
   APP_BALL_ERR,           /* 偏差 cm */
-  APP_BALL_VEL,           /* 球速 cm/s */
-  APP_BALL_OUT,           /* PID 输出，相对水平点的 us 偏移 */
+  APP_BALL_VEL,           /* 球速 cm/s(实测) */
+  APP_BALL_VSET,          /* 位置环下达的速度指令 cm/s —— 串级调试看这个 */
+  APP_BALL_OUT,           /* 速度环输出，相对水平点的 us 偏移 */
   APP_BALL_US,            /* 实际下发的舵机脉宽 */
   APP_BALL_STATE,         /* 是否正在闭环 */
   APP_BALL_FIELD_NUM
@@ -203,7 +206,7 @@ static uint8_t App_FieldCount(void)
 {
   switch (s_page)
   {
-    case APP_PAGE_VISION: return APP_VISION_FIELD_NUM;
+    case APP_PAGE_PID:    return APP_PID_FIELD_NUM;
     case APP_PAGE_BALL:   return APP_BALL_FIELD_NUM;
     default:              return APP_MAIN_FIELD_NUM;
   }
@@ -242,23 +245,23 @@ static void App_DrawStaticLayout(void)
 }
 
 /**
-  * @brief  画视觉页里不会变化的部分
+  * @brief  画 PID 页里不会变化的部分
   */
 static void App_ShowPage(void);
 
-static void App_DrawVisionLayout(void)
+static void App_DrawPidLayout(void)
 {
-  static const char *labels[APP_VISION_FIELD_NUM] =
+  static const char *labels[APP_PID_FIELD_NUM] =
   {
-    "X:", "VX:", "CONF:", "TS:", "RX:", "ERR:", "AGE:", "LINK:"
+    "PKP:", "PKI:", "PKD:", "VKP:", "VKI:", "VKD:"
   };
 
   LCD_SetAsciiFont(&APP_FONT);
   LCD_SetColor(LCD_WHITE);
 
-  LCD_DisplayString((LCD_Width - 6 * APP_FONT_W) / 2, APP_TASK_Y, "VISION");
+  LCD_DisplayString((LCD_Width - 3 * APP_FONT_W) / 2, APP_TASK_Y, "PID");
 
-  for (uint8_t i = 0; i < APP_VISION_FIELD_NUM; i++)
+  for (uint8_t i = 0; i < APP_PID_FIELD_NUM; i++)
   {
     LCD_DisplayString(APP_LABEL_X, APP_VIS_Y0 + i * APP_VIS_DY, (char *)labels[i]);
   }
@@ -271,7 +274,7 @@ static void App_DrawBallLayout(void)
 {
   static const char *labels[APP_BALL_FIELD_NUM] =
   {
-    "SET:", "POS:", "ERR:", "VEL:", "OUT:", "US:", "RUN:"
+    "SET:", "POS:", "ERR:", "VEL:", "VSET:", "OUT:", "US:", "RUN:"
   };
 
   LCD_SetAsciiFont(&APP_FONT);
@@ -318,6 +321,14 @@ static void App_DrawBallField(uint8_t field)
 
     case APP_BALL_VEL:
       LCD_DisplayDecimals(APP_VIS_VALUE_X, y, Ball_GetVelCmS(), APP_VIS_VALUE_LEN, 1);
+      break;
+
+    case APP_BALL_VSET:
+      /* 位置环下达的速度指令 —— 串级调试时最该看的中间量。
+         VEL 迟迟追不上 VSET 就是速度环 Kp 不够；VSET 本身抖得厉害
+         就是位置环 Kd 不够或 Kp 太大 */
+      LCD_SetColor(LCD_CYAN);
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, Ball_GetVelSetCmS(), APP_VIS_VALUE_LEN, 1);
       break;
 
     case APP_BALL_OUT:
@@ -441,54 +452,42 @@ static void App_DrawTime(void)
 }
 
 /**
-  * @brief  重画视觉页的一个数值字段
+  * @brief  重画 PID 页的一个数值字段
+  * @note   每次都重新 Ball_GetTune() 取一份 —— 这一页刷新不快(APP_DRAW_EVERY)，
+  *         没必要为了省这一次结构体拷贝去额外维护缓存
   */
-static void App_DrawVisionField(uint8_t field)
+static void App_DrawPidField(uint8_t field)
 {
-  const Vision_Ball *b = Vision_GetBall();
-  uint16_t           y = APP_VIS_Y0 + field * APP_VIS_DY;
+  Ball_Tune tune = Ball_GetTune();
+  uint16_t  y    = APP_VIS_Y0 + field * APP_VIS_DY;
 
   LCD_SetAsciiFont(&APP_FONT);
-
-  /* 数据过期时整页数值转灰白，避免把陈旧坐标当成实时值读 */
-  LCD_SetColor(Vision_IsFresh() ? LCD_GREEN : LCD_RED);
+  LCD_SetColor(LCD_CYAN);
 
   switch (field)
   {
-    case APP_VIS_X:
-      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, b->x_cm, APP_VIS_VALUE_LEN, 2);
+    case APP_PID_POS_KP:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, tune.pos_kp, APP_VIS_VALUE_LEN, 2);
       break;
 
-    case APP_VIS_VX:
-      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, b->vx_pixel_s, APP_VIS_VALUE_LEN, 1);
+    case APP_PID_POS_KI:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, tune.pos_ki, APP_VIS_VALUE_LEN, 2);
       break;
 
-    case APP_VIS_CONF:
-      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, b->confidence, APP_VIS_VALUE_LEN, 2);
+    case APP_PID_POS_KD:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, tune.pos_kd, APP_VIS_VALUE_LEN, 2);
       break;
 
-    case APP_VIS_TS:
-      LCD_SetColor(LCD_WHITE);
-      LCD_DisplayNumber(APP_VIS_VALUE_X, y, (int32_t)b->frame_time_ms, APP_VIS_VALUE_LEN);
+    case APP_PID_VEL_KP:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, tune.vel_kp, APP_VIS_VALUE_LEN, 2);
       break;
 
-    case APP_VIS_FRAMES:
-      LCD_SetColor(LCD_WHITE);
-      LCD_DisplayNumber(APP_VIS_VALUE_X, y, (int32_t)Vision_GetFrameCount(), APP_VIS_VALUE_LEN);
+    case APP_PID_VEL_KI:
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, tune.vel_ki, APP_VIS_VALUE_LEN, 2);
       break;
 
-    case APP_VIS_ERR:
-      /* 有错就标红。偶发几次是对端上电抖动，持续增长就是波特率或接线问题 */
-      LCD_SetColor((Vision_GetErrorCount() == 0U) ? LCD_WHITE : LCD_RED);
-      LCD_DisplayNumber(APP_VIS_VALUE_X, y, (int32_t)Vision_GetErrorCount(), APP_VIS_VALUE_LEN);
-      break;
-
-    case APP_VIS_AGE:
-      LCD_DisplayNumber(APP_VIS_VALUE_X, y, (int32_t)Vision_GetAgeMs(), APP_VIS_VALUE_LEN);
-      break;
-
-    default:    /* APP_VIS_LINK */
-      LCD_DisplayString(APP_VIS_VALUE_X, y, Vision_IsFresh() ? "  OK  " : " LOST ");
+    default:    /* APP_PID_VEL_KD */
+      LCD_DisplayDecimals(APP_VIS_VALUE_X, y, tune.vel_kd, APP_VIS_VALUE_LEN, 2);
       break;
   }
 }
@@ -499,9 +498,9 @@ static void App_DrawVisionField(uint8_t field)
   */
 static void App_DrawField(uint8_t field)
 {
-  if (s_page == APP_PAGE_VISION)
+  if (s_page == APP_PAGE_PID)
   {
-    App_DrawVisionField(field);
+    App_DrawPidField(field);
     return;
   }
   if (s_page == APP_PAGE_BALL)
@@ -645,9 +644,9 @@ static void App_ShowPage(void)
   s_draw_field = 0;
   s_draw_cnt   = 0;
 
-  if (s_page == APP_PAGE_VISION)
+  if (s_page == APP_PAGE_PID)
   {
-    App_DrawVisionLayout();
+    App_DrawPidLayout();
     return;
   }
   if (s_page == APP_PAGE_BALL)
@@ -677,6 +676,9 @@ void App_Init(void)
 
   /* ---------- 视觉模块 ---------- */
   Vision_Init();
+
+  /* ---------- VOFA+ 上位机 ---------- */
+  Vofa_Init();
 
   /* ---------- 灰度传感器 ---------- */
   s_gray_status = Gray_Init();
@@ -736,6 +738,9 @@ void App_Run(void)
   /* ---------- 视觉：解析中断收进来的字节 ---------- */
   Vision_Update();
 
+  /* ---------- VOFA+：解析上位机指令 + 周期发一帧画图数据 ---------- */
+  Vofa_Update();
+
 #if (APP_SERVO_MODE == APP_SERVO_MANUAL)
   /* 舵机标定模式征用了 KEY3/KEY4，此时不翻页 */
 #else
@@ -750,6 +755,20 @@ void App_Run(void)
 #if (APP_SERVO_MODE == APP_SERVO_DEMO)
   Servo_DemoUpdate();                   /* 在 1050~2400us 之间往复摆动 */
 #elif (APP_SERVO_MODE == APP_SERVO_BALL)
+  /* 视觉端新增的 target_cm 只在【没有任务在运行】且【本帧确实带了这个字段】
+     时才采用 —— 任务运行中的目标由 task.c 的状态机(如任务三的 +5cm/-5cm
+     折返)或 vofa.c 的 T 指令管理，每帧都用视觉值覆盖会把它们的目标切换打断；
+     视觉端没发目标的帧(has_target==0)自然也不该拿 0 去瞎设。
+     断链(Vision_IsFresh()==0)时同样不采用，避免拿着陈旧值瞎跑 */
+  if (!Task_IsRunning() && Vision_IsFresh())
+  {
+    const Vision_Ball *vb = Vision_GetBall();
+
+    if (vb->has_target)
+    {
+      Ball_SetTarget(vb->target_cm);
+    }
+  }
   Ball_Update();                        /* 球杆闭环，内部只在新帧到达时动作 */
 #elif (APP_SERVO_MODE == APP_SERVO_MANUAL)
   /* KEY3/KEY4：舵机以最小步进(1us)增减脉宽，用来标定机构行程。

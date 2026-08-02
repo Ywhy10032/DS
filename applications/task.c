@@ -160,28 +160,11 @@ static void Task_Start(void)
   /* 任务三：车不动，摆杆先把球送到 +5cm */
   else if (s_task == TASK_3)
   {
-    /* 装载任务三专用的球杆参数。任务三要"冲得快 + 到位后彻底撒手"，
-       和载球行驶(任务四/五/六)那种"稳在中心、抗车体扰动"的要求是冲突的，
-       一套参数满足不了两边 —— 各项取值与理由见 task.h 的 TASK3_BALL_* */
+    /* 装载任务三专用的球杆参数 —— 串级之后只剩速度上限这一项需要单独调，
+       见 task.h 的 TASK3_BALL_VEL_LIMIT_CMS */
     Ball_Tune tune = BALL_TUNE_DEFAULT_INIT;
 
-    tune.sag_us_per_cm      = TASK3_BALL_SAG_US_PER_CM;
-    tune.kp                 = TASK3_BALL_FINE_KP;
-    tune.kd                 = TASK3_BALL_FINE_KD;
-    tune.coarse_kd          = TASK3_BALL_COARSE_KD;
-    tune.coarse_err_cm      = TASK3_BALL_COARSE_ERR_CM;
-    tune.stiction_us        = TASK3_BALL_STICTION_US;
-    tune.stiction_err_cm    = TASK3_BALL_STICTION_ERR_CM;
-
-    tune.micro_err_cm             = TASK3_BALL_MICRO_ERR_CM;
-    tune.micro_kp                 = TASK3_BALL_MICRO_KP;
-    tune.micro_kd                 = TASK3_BALL_MICRO_KD;
-    tune.micro_friction_ff_us     = TASK3_BALL_MICRO_FRICTION_FF_US;
-    tune.micro_stiction_us        = TASK3_BALL_MICRO_STICTION_US;
-    tune.micro_stiction_preload_us = TASK3_BALL_MICRO_STICTION_PRELOAD_US;
-    tune.micro_ramp_ups           = TASK3_BALL_MICRO_RAMP_UPS;
-    tune.fine_friction_ff_us = TASK3_BALL_FINE_FF_US;
-    tune.ff_fade_cms        = TASK3_BALL_FF_FADE_CMS;
+    tune.vel_limit_cms = TASK3_BALL_VEL_LIMIT_CMS;
 
     Ball_SetTune(&tune);
 
@@ -293,12 +276,9 @@ static void Task3_Run(void)
       if (err <= TASK3_ARRIVE_CM)
       {
         s_t3_phase = TASK3_GO_MINUS;
-        /* 下发的是带瞄准偏置的目标，不是真实的 -5cm —— 见 task.h 的
-           TASK3_MINUS_AIM_CM。折返判据(err<=ARRIVE_CM)也会跟着用这个偏置
-           目标算，等于把"到位"的判定线也一起挪了 0.5cm，这正是需要的效果：
-           不这样挪的话，折返/稳定判定还是按真实 7.5 算，球停在偏置后的位置
-           时反而会被判成"没到位"而一直不结束。 */
-        Ball_SetTarget(TASK3_MINUS_AIM_CM);
+        /* 串级下不再需要瞄准偏置去补稳态残差 —— 那是速度环积分的职责，
+           这里直接下发真实的 -5cm */
+        Ball_SetTarget(TASK3_MINUS_CM);
       }
       break;
 
@@ -444,25 +424,9 @@ void Task_Init(void)
 void Task_Update(void)
 {
   /* ---------- KEY1：切换任务 ---------- */
-  /* 运行中屏蔽，避免跑着跑着被误触切走 */
   if (Key_WasPressed(KEY1))
   {
-    if (s_state != TASK_STATE_RUN)
-    {
-      s_task  = (Task_ID)((s_task + 1) % TASK_NUM);
-      s_state = TASK_STATE_IDLE;
-      s_elapsed_ms = 0;
-      s_distance_m = 0.0f;
-
-      /* 切到载球任务时，先让摆杆把球送回中心 O 待命。
-         任务三/四/五的规则都是"钢球置于中心点 O"再启动 —— 与其靠手摆，
-         不如切过去就自动归位，按 KEY2 时球已经在起点上了。
-         任务六不归位：它的起点本来就是任意指定位置。 */
-      if ((s_task == TASK_3) || (s_task == TASK_4) || (s_task == TASK_5))
-      {
-        Ball_SetTarget(TASK3_CENTER_CM);
-      }
-    }
+    Task_SetId((Task_ID)((s_task + 1) % TASK_NUM));
   }
 
   /* ---------- KEY2：启动 / 中途停止 ---------- */
@@ -470,11 +434,11 @@ void Task_Update(void)
   {
     if (s_state == TASK_STATE_RUN)
     {
-      Task_Finish(TASK_STATE_IDLE);       /* 手动叫停，计时定格 */
+      Task_Stop();
     }
     else
     {
-      Task_Start();
+      Task_Go();
     }
   }
 
@@ -529,6 +493,45 @@ Task_State Task_GetState(void)
 uint8_t Task_IsRunning(void)
 {
   return (s_state == TASK_STATE_RUN);
+}
+
+void Task_SetId(Task_ID id)
+{
+  /* 运行中屏蔽，避免跑着跑着被(物理按键或远程指令)误切走 */
+  if ((s_state == TASK_STATE_RUN) || (id >= TASK_NUM))
+  {
+    return;
+  }
+
+  s_task       = id;
+  s_state      = TASK_STATE_IDLE;
+  s_elapsed_ms = 0;
+  s_distance_m = 0.0f;
+
+  /* 切到载球任务时，先让摆杆把球送回中心 O 待命。
+     任务三/四/五的规则都是"钢球置于中心点 O"再启动 —— 与其靠手摆，
+     不如切过去就自动归位，启动时球已经在起点上了。
+     任务六不归位：它的起点本来就是任意指定位置。 */
+  if ((s_task == TASK_3) || (s_task == TASK_4) || (s_task == TASK_5))
+  {
+    Ball_SetTarget(TASK3_CENTER_CM);
+  }
+}
+
+void Task_Go(void)
+{
+  if (s_state != TASK_STATE_RUN)
+  {
+    Task_Start();
+  }
+}
+
+void Task_Stop(void)
+{
+  if (s_state == TASK_STATE_RUN)
+  {
+    Task_Finish(TASK_STATE_IDLE);       /* 手动叫停，计时定格 */
+  }
 }
 
 uint8_t Task_UsesVehicle(void)

@@ -46,7 +46,14 @@ void UART4_IRQHandler(void)
 }
 #endif
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+/**
+  * @brief  UART4 接收完成回调
+  * @note   不再直接叫 HAL_UART_RxCpltCallback —— 这个名字全工程只能有一份
+  *         定义，USART1 那路(vofa.c)也要用。真正的 HAL 回调集中放在
+  *         usart.c 里按 huart->Instance 分发给各自模块，见该文件 USER CODE
+  *         BEGIN 1 段。
+  */
+void Vision_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance != UART4)
   {
@@ -66,7 +73,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   HAL_UART_Receive_IT(huart, &s_rx_byte, 1);
 }
 
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+void Vision_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance != UART4)
   {
@@ -93,7 +100,7 @@ static const char *Vision_NextField(const char *p)
 }
 
 /**
-  * @brief  解析一帧 "$BALL,1,12.34,-5.6,0.87,123456"
+  * @brief  解析一帧 "$BALL,1,12.34,-5.6,0.87,123456,12.50"
   * @note   用 strtof/strtoul 而不是 sscanf("%f")：newlib-nano 的 scanf 默认
   *         不带浮点支持，%f 会解析失败，而 strtof 不受这个限制。
   */
@@ -131,6 +138,24 @@ static uint8_t Vision_ParseLine(const char *line)
 
   b.frame_time_ms = (uint32_t)strtoul(p, &end, 10);
   if (end == p) { return 0; }
+
+  /* target_cm 是可选字段：视觉端不想指定目标时可以整个省掉，老格式(不带
+     这个字段)的帧必须仍然能正常解出前面这些数据 —— 不能因为少一个字段就
+     把 valid/x_cm/confidence 这些好端端的信息也一起丢掉 */
+  p = Vision_NextField(end);
+  if (p != NULL)
+  {
+    float target = strtof(p, &end);
+
+    if (end == p) { return 0; }   /* 有逗号却没跟合法数字，仍算格式错误 */
+    b.target_cm  = target;
+    b.has_target = 1;
+  }
+  else
+  {
+    b.target_cm  = 0.0f;
+    b.has_target = 0;
+  }
 
   /* 整帧都解出来了才提交，避免半截数据污染上一帧的有效值 */
   s_ball      = b;
