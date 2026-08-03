@@ -15,6 +15,7 @@
 #include "ball.h"
 #include "servo.h"
 #include "task.h"
+#include "battery.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -287,7 +288,7 @@ static void Vofa_SendFrame(void)
   }
 
   len = snprintf(s_tx_line, sizeof(s_tx_line),
-                 "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                 "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
                  (double)Ball_GetTarget(),
                  (double)Ball_GetPosCm(),
                  (double)(Ball_GetTarget() - Ball_GetPosCm()),
@@ -298,7 +299,8 @@ static void Vofa_SendFrame(void)
                  Ball_IsTracking() ? 1.0 : 0.0,
                  (double)(Task_GetId() + 1),   /* 发几就是任务几，跟 N 指令同一套编号 */
                  Task_IsRunning() ? 1.0 : 0.0,
-                 (double)Task_GetElapsedMs() / 1000.0);
+                 (double)Task_GetElapsedMs() / 1000.0,
+                 (double)Battery_GetVoltage());
 
   if (len <= 0)                  /* 编码失败，没什么好发的 */
   {

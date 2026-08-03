@@ -33,6 +33,7 @@
   *   ch9  当前任务是否在运行，0/1(TASK_RUN)
   *   ch10 当前任务已耗时，秒(TASK_ELAPSED_S) —— 完成/停止后定格，
   *        与 app.c 主界面秒表显示的是同一个数
+  *   ch11 电池电压 V(BATTERY_V)，见 battery.c 的一阶低通滤波值
   *
   * 用 snprintf 拼文本：CMakeLists.txt 里已经为 LCD_DisplayDecimals() 链了
   * -u _printf_float，浮点版 printf 族在这个工程里本来就可用，不必像
@@ -76,12 +77,12 @@
 /* 上行发送周期(ms)，跟 app.c 外环/task 层同拍，没必要发得比控制还快 */
 #define VOFA_TX_PERIOD_MS     20
 
-/* 通道数，见上面 FireWater 格式说明的 ch0~ch10 列表 */
-#define VOFA_TX_CH_NUM        11
+/* 通道数，见上面 FireWater 格式说明的 ch0~ch11 列表 */
+#define VOFA_TX_CH_NUM        12
 
-/* 一行文本的最大长度："-1234.56," 每通道最多约 10 字节，11 通道 + 换行 +
+/* 一行文本的最大长度："-1234.56," 每通道最多约 10 字节，12 通道 + 换行 +
    结尾 '\0' 留足余量。snprintf 万一算出更长也会在这里截断，不会越界 */
-#define VOFA_TX_LINE_MAX      144
+#define VOFA_TX_LINE_MAX      156
 
 /* 初始化。须在 MX_USART1_UART_Init() 之后调用 */
 void Vofa_Init(void);
