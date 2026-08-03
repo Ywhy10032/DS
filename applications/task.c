@@ -30,6 +30,10 @@ static uint32_t s_elapsed_ms   = 0;          /* 完成/停止后定格 */
 static int32_t  s_start_count  = 0;          /* 启动时的编码器基准 */
 static float    s_distance_m   = 0.0f;
 static float    s_ramp_rpm     = 0.0f;       /* 载球任务的速度斜坡当前值 */
+static float    s_ramp_accel   = 0.0f;       /* 本拍施加的加速度(rpm/秒)，带符号。
+                                                它自己也走斜坡(限 jerk)，见
+                                                Task_RampBase() 与 task.h 的
+                                                TASK_ACCEL_RISE_S */
 static uint32_t s_split_ms     = 0;          /* 到达评分点的用时，0 = 还没到 */
 static uint8_t  s_lap_done     = 0;          /* 任务五/六：整圈已跑完 */
 static uint32_t s_lap_done_ms  = 0;          /* 通过 A 的时刻，用来算滑行时长 */
@@ -84,29 +88,57 @@ static void Task_UpdateOdometry(void)
   */
 static void Task_RampBase(float target_rpm, float accel, float decel)
 {
-  float applied = 0.0f;
+  float gap   = target_rpm - s_ramp_rpm;
+  float a_lim = (gap >= 0.0f) ? accel : decel;    /* 本方向允许的加速度幅值 */
+  float jerk;
+  float a_cap;
+  float want;
+  float step;
 
-  if (s_ramp_rpm < target_rpm)
+  /* ---------- 加速度自己也要走斜坡 ---------- */
+  /* 光限住速度的变化率还不够：球感受到的是【加速度】，而上一版里加速度
+     本身是阶跃的 —— 起步那一拍从 0 直接跳到满值，斜坡走完又跳回 0。
+     更糟的是加速度前馈跟着它走，杆的倾角也在一个 20ms 拍里甩出去，
+     那一甩自己又是一次甩球。所以这里再限一层 jerk，让加速度在
+     TASK_ACCEL_RISE_S 内建立起来，速度曲线变成 S 形。见 task.h 的说明 */
+  jerk = a_lim / TASK_ACCEL_RISE_S;
+
+  /* 提前把加速度收回 0：和 ball.c 位置环的刹车曲线是同一个式子。
+     以 jerk 把当前加速度收到 0 的过程中速度还会再变 a²/(2 x jerk)，所以
+     离目标速度只剩这么多时就必须开始收 —— 否则冲过目标速度再反向拉回来，
+     球会被这一来一回甩两次 */
+  a_cap = sqrtf(2.0f * jerk * fabsf(gap));
+  want  = (a_lim < a_cap) ? a_lim : a_cap;
+  if (gap < 0.0f)
   {
-    s_ramp_rpm += accel * TRACK_PERIOD_S;
-    if (s_ramp_rpm > target_rpm)
-    {
-      s_ramp_rpm = target_rpm;
-    }
-    applied = accel;
+    want = -want;
   }
-  else if (s_ramp_rpm > target_rpm)
+
+  step = jerk * TRACK_PERIOD_S;
+  if (s_ramp_accel < want)
   {
-    s_ramp_rpm -= decel * TRACK_PERIOD_S;
-    if (s_ramp_rpm < target_rpm)
-    {
-      s_ramp_rpm = target_rpm;
-    }
-    applied = -decel;
+    s_ramp_accel += step;
+    if (s_ramp_accel > want) { s_ramp_accel = want; }
+  }
+  else if (s_ramp_accel > want)
+  {
+    s_ramp_accel -= step;
+    if (s_ramp_accel < want) { s_ramp_accel = want; }
+  }
+
+  s_ramp_rpm += s_ramp_accel * TRACK_PERIOD_S;
+
+  /* 数值上越过目标就夹住(浮点残差)，加速度同时清零 —— 否则前馈会带着
+     一个不存在的加速度继续倾杆 */
+  if (((gap >= 0.0f) && (s_ramp_rpm > target_rpm)) ||
+      ((gap <  0.0f) && (s_ramp_rpm < target_rpm)))
+  {
+    s_ramp_rpm   = target_rpm;
+    s_ramp_accel = 0.0f;
   }
 
   Track_SetBaseSpeed(s_ramp_rpm);
-  Ball_SetAccelFF(applied);
+  Ball_SetAccelFF(s_ramp_accel);
 }
 
 /**
@@ -132,6 +164,7 @@ static void Task_Start(void)
   s_start_count = Task_AvgCount();
   s_distance_m  = 0.0f;
   s_ramp_rpm    = 0.0f;
+  s_ramp_accel  = 0.0f;
   s_split_ms    = 0;
   s_lap_done    = 0;
   s_lap_done_ms = 0;
@@ -200,6 +233,12 @@ static void Task_Start(void)
   {
     Track_SetTunings(TASK4_STEER_KP, TASK4_STEER_KI, TASK4_STEER_KD);
     Track_SetCurveSlowdown(TASK4_CURVE_SLOWDOWN);
+
+    /* 差速上限要显式设：上面 Track_Init() 每次启动都把它复位回全局默认的
+       100rpm，不设这一句任务四就一直在用 100 —— 偶发的大偏差修正会让车猛地
+       一拧，那一下横摆足以把球甩出去。理由同任务五，见 task.h */
+    Track_SetSteerLimit(TASK4_STEER_LIMIT_RPM);
+
     Track_SetBaseSpeed(0.0f);
   }
   /* 任务五/六：整圈慢速匀速跑，转向比任务四硬一点(要过弯)、差速上限收紧。
@@ -210,6 +249,16 @@ static void Task_Start(void)
     Track_SetTunings(TASK56_STEER_KP, TASK56_STEER_KI, TASK56_STEER_KD);
     Track_SetCurveSlowdown(TASK56_CURVE_SLOWDOWN);
     Track_SetSteerLimit(TASK56_STEER_LIMIT_RPM);
+    Track_SetBaseSpeed(0.0f);
+  }
+  /* 任务七(隐藏)：倒车。不跑循迹外环，轮速由 Task_GetDriveTargets() 直接给，
+     所以这里没有转向参数可设 —— 车头的灰度阵列倒着走时是正反馈，见 task.h */
+  else if (s_task == TASK_7)
+  {
+    /* 弯道前馈清零：直着倒，没有向心加速度。它不像加速度前馈那样在上面被
+       统一清过，不清的话会带着上一个任务过弯时残留的值一直倾着杆 */
+    Ball_SetCurveFF(0.0f);
+
     Track_SetBaseSpeed(0.0f);
   }
 }
@@ -473,6 +522,55 @@ static void TaskBallLap_Run(void)
   }
 }
 
+/**
+  * @brief  任务七(隐藏)：直着往后倒一段，到里程就平缓停住
+  * @note   全程【不跑循迹外环】，左右轮给同一个负转速，由 app.c 每拍从
+  *         Task_GetDriveTargets() 取走 —— 倒着走时车头的灰度阵列是拖在
+  *         后面的，循迹环在这个几何下是正反馈。理由详见 task.h 任务七参数区。
+  *
+  *         起停照样走 Task_RampBase() 的 S 形斜坡：倒车不是评分项目，但杆上
+  *         可能还架着球，没道理为了省一秒去顿一下。
+  */
+static void Task7_Run(void)
+{
+  float target_rpm;
+  float dist;
+
+  Task_UpdateOdometry();
+
+  /* 倒车时里程是负的(编码器倒转)，判距离只看走了多远，取绝对值 */
+  dist = fabsf(s_distance_m);
+
+  /* 到"总行程减去减速提前量"就开始收油门，让车正好在 TASK7_DIST_M 附近停住。
+     和任务四同一个思路：用里程而不是时间做判据，时间会随电量漂移 */
+  target_rpm = (dist >= (TASK7_DIST_M - TASK7_BRAKE_M)) ? 0.0f : -TASK7_BASE_RPM;
+
+  Task_RampBase(target_rpm, TASK7_ACCEL_RPM_PER_S, TASK7_DECEL_RPM_PER_S);
+
+  /* 斜坡走完(速度已经归零)才正式结束，避免最后再补一脚硬刹。
+     注意方向是反的：倒车段 s_ramp_rpm 是负值，往上收敛到 0 */
+  if ((target_rpm >= 0.0f) && (s_ramp_rpm >= 0.0f))
+  {
+    Task_Finish(TASK_STATE_DONE);
+  }
+
+  /* 不设时间兜底：这是个工具而不是评分项目，跑多久都无所谓，
+     里程一直不够就一直往后倒，按 KEY2 / 发 S 叫停。见 task.h 的说明 */
+}
+
+/**
+  * @brief  短按 KEY1 时切到的下一个任务
+  * @note   隐藏的任务七不参与这个循环 —— 它只能靠长按 KEY1 或 vofa 的 N7
+  *         切过去，所以正常操作时按 KEY1 转一圈仍然是任务一~任务六。
+  *         从任务七按 KEY1 则回到任务一，等于"退出隐藏任务"。
+  */
+static Task_ID Task_NextId(void)
+{
+  Task_ID next = (Task_ID)(s_task + 1);
+
+  return (next >= TASK_7) ? TASK_1 : next;
+}
+
 void Task_Init(void)
 {
   Key_Init();
@@ -485,10 +583,19 @@ void Task_Init(void)
 
 void Task_Update(void)
 {
-  /* ---------- KEY1：切换任务 ---------- */
-  if (Key_WasPressed(KEY1))
+  /* ---------- KEY1：短按切换任务，长按倒车 ---------- */
+  /* 用 Key_WasClicked() 而不是 Key_WasPressed()：短按要等抬手才判定，
+     否则长按会在按下的那一刻先把任务切走一次(见 key.h 的说明)。
+     长按直接【切过去并启动】，不用再按 KEY2 —— 倒车是个随手用的工具，
+     两步操作太啰嗦；运行中长按无效，两个入口都被 Task_SetId/Task_Go 挡住 */
+  if (Key_WasLongPressed(KEY1))
   {
-    Task_SetId((Task_ID)((s_task + 1) % TASK_NUM));
+    Task_SetId(TASK_7);
+    Task_Go();
+  }
+  else if (Key_WasClicked(KEY1))
+  {
+    Task_SetId(Task_NextId());
   }
 
   /* ---------- KEY2：启动 / 中途停止 ---------- */
@@ -534,6 +641,10 @@ void Task_Update(void)
     case TASK_5:
     case TASK_6:
       TaskBallLap_Run();
+      break;
+
+    case TASK_7:
+      Task7_Run();
       break;
 
     default:
@@ -612,6 +723,29 @@ uint8_t Task_UsesVehicle(void)
   /* 静止任务：车原地不动。
      任务一只摆舵机(看机构行程)，任务三全靠摆杆把球送到位 */
   return ((s_task != TASK_1) && (s_task != TASK_3));
+}
+
+uint8_t Task_GetDriveTargets(float *left_rpm, float *right_rpm)
+{
+  /* 只有倒车任务接管轮速，而且只在它真的跑着的时候 —— 停下来之后必须交还，
+     否则 app.c 会一直照着最后那个负转速把车往后推 */
+  if ((s_task != TASK_7) || (s_state != TASK_STATE_RUN))
+  {
+    return 0;
+  }
+
+  /* 两轮同一个目标：直走完全交给两路速度环各自跟住自己的转速，
+     任务层不做任何转向修正(没有可用的传感器，见 task.h) */
+  if (left_rpm != NULL)
+  {
+    *left_rpm = s_ramp_rpm;
+  }
+  if (right_rpm != NULL)
+  {
+    *right_rpm = s_ramp_rpm;
+  }
+
+  return 1;
 }
 
 uint32_t Task_GetElapsedMs(void)

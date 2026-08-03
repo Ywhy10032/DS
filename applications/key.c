@@ -26,16 +26,22 @@ static uint8_t  s_counter[KEY_NUM]  = {0};  /* 连续同电平计数 */
 static uint8_t  s_pressed[KEY_NUM]  = {0};  /* 待取走的按下事件 */
 static uint8_t  s_repeated[KEY_NUM] = {0};  /* 待取走的按下/连发事件 */
 static uint16_t s_hold[KEY_NUM]     = {0};  /* 已按住多少次扫描 */
+static uint8_t  s_clicked[KEY_NUM]   = {0}; /* 待取走的短按事件(抬手时才判定) */
+static uint8_t  s_long[KEY_NUM]      = {0}; /* 待取走的长按事件 */
+static uint8_t  s_long_done[KEY_NUM] = {0}; /* 本次按住已经报过长按了 */
 
 void Key_Init(void)
 {
   for (uint8_t i = 0; i < KEY_NUM; i++)
   {
-    s_stable[i]   = 0;
-    s_counter[i]  = 0;
-    s_pressed[i]  = 0;
-    s_repeated[i] = 0;
-    s_hold[i]     = 0;
+    s_stable[i]    = 0;
+    s_counter[i]   = 0;
+    s_pressed[i]   = 0;
+    s_repeated[i]  = 0;
+    s_hold[i]      = 0;
+    s_clicked[i]   = 0;
+    s_long[i]      = 0;
+    s_long_done[i] = 0;
   }
 }
 
@@ -61,9 +67,17 @@ void Key_Scan(void)
 
         if (raw)
         {
-          s_pressed[i]  = 1;               /* 记下一次下降沿 */
-          s_repeated[i] = 1;
-          s_hold[i]     = 0;
+          s_pressed[i]   = 1;              /* 记下一次下降沿 */
+          s_repeated[i]  = 1;
+          s_hold[i]      = 0;
+          s_long_done[i] = 0;
+        }
+        else if (!s_long_done[i])
+        {
+          /* 抬手了，而且这一次按住没够到长按门槛 -> 判定为一次短按。
+             短按必须等到抬手才能判：按下的那一刻还不知道用户要按多久，
+             在按下就发事件的话，长按会先触发一次短按(见 key.h 的说明) */
+          s_clicked[i] = 1;
         }
       }
     }
@@ -78,6 +92,15 @@ void Key_Scan(void)
     if (s_hold[i] < 0xFFFFU)
     {
       s_hold[i]++;
+    }
+
+    /* ---------- 长按 ---------- */
+    /* 按满门槛的【当下】就发事件，不等抬手 —— 手指还按着就能看到反应
+       (屏幕上任务号已经跳过去了)，比抬手才动更有确认感 */
+    if (!s_long_done[i] && (s_hold[i] >= KEY_LONG_PRESS_TICKS))
+    {
+      s_long_done[i] = 1;
+      s_long[i]      = 1;
     }
 
     if ((s_hold[i] > KEY_REPEAT_DELAY_TICKS) &&
@@ -113,6 +136,34 @@ uint8_t Key_WasRepeated(Key_ID id)
 
   event = s_repeated[id];
   s_repeated[id] = 0;
+  return event;
+}
+
+uint8_t Key_WasClicked(Key_ID id)
+{
+  uint8_t event;
+
+  if (id >= KEY_NUM)
+  {
+    return 0;
+  }
+
+  event = s_clicked[id];
+  s_clicked[id] = 0;
+  return event;
+}
+
+uint8_t Key_WasLongPressed(Key_ID id)
+{
+  uint8_t event;
+
+  if (id >= KEY_NUM)
+  {
+    return 0;
+  }
+
+  event = s_long[id];
+  s_long[id] = 0;
   return event;
 }
 

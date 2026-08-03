@@ -189,9 +189,25 @@ static uint8_t Vofa_ParseLine(const char *line)
       return 1;
     }
 
+    case 'F':
+    {
+      /* 加速度前馈增益(us 每 rpm/秒)，例如 F7.0 —— 治"起步球被甩到后面"。
+         它【不属于 Ball_Tune】，所以不会被 R 指令/按 KEY2 冲掉，运行前标好
+         就能留到下一趟起步(起步就发生在按下 KEY2 之后的头一秒，放进 Ball_Tune
+         的话根本来不及调)。看 vofa 上起步那一下位置的峰值：还往后滑(x 增大)
+         就加大，反而往前冲就减小。见 ball.h 的 BALL_FF_US_PER_RPMS */
+      float g = strtof(p, &end);
+
+      if ((end == p) || (g < 0.0f)) { return 0; }
+      Ball_SetAccelFFGain(g);
+      return 1;
+    }
+
     case 'N':
     {
-      uint32_t n = strtoul(p, &end, 10);   /* 发几就是任务几，1~6，没有任务 0 */
+      /* 发几就是任务几，1~7，没有任务 0。7 是隐藏的倒车任务 —— 短按 KEY1
+         的循环切不到它，这条指令(和长按 KEY1)是仅有的两个入口 */
+      uint32_t n = strtoul(p, &end, 10);
 
       if ((end == p) || (n < 1U) || (n > (uint32_t)TASK_NUM))
       {

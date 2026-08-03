@@ -38,6 +38,11 @@ void Key_Scan(void);
 #define KEY_REPEAT_DELAY_TICKS  40
 #define KEY_REPEAT_PERIOD_TICKS 1
 
+/* 按住多少次扫描算"长按"。按 10ms 的扫描周期算 = 0.8s。
+   别低于 0.5s：太短的话正常的一次按键很容易被误判成长按；也别太长，
+   手指按着没反应会让人以为按键失灵(实际按满门槛的当下就有反应)。 */
+#define KEY_LONG_PRESS_TICKS    80
+
 /* 取走一次"按下"事件(下降沿)，读到后自动清除，不会重复触发 */
 uint8_t Key_WasPressed(Key_ID id);
 
@@ -48,6 +53,22 @@ uint8_t Key_WasPressed(Key_ID id);
   *         调参那种按住要连续走的用本函数。
   */
 uint8_t Key_WasRepeated(Key_ID id);
+
+/**
+  * @brief  取走一次"短按"事件 —— 按下并在 KEY_LONG_PRESS_TICKS 之内抬手
+  * @note   与 Key_WasLongPressed() 配对使用，一次按键只会命中其中一个：
+  *         按住够久 -> 长按事件(按满门槛的当下就发)，抬手时不再补短按；
+  *         提前抬手 -> 短按事件。
+  *
+  *         代价是短按【要等抬手才生效】，比 Key_WasPressed() 晚一点。只有
+  *         真的需要区分长短按的键才用它(如 KEY1：短按切任务、长按倒车)，
+  *         其余的键继续用 Key_WasPressed() 按下即响应。
+  *         三套事件位各自独立，同一个键混着读也互不影响。
+  */
+uint8_t Key_WasClicked(Key_ID id);
+
+/* 取走一次"长按"事件，见上面 Key_WasClicked() 的说明 */
+uint8_t Key_WasLongPressed(Key_ID id);
 
 /* 当前是否按住 */
 uint8_t Key_IsDown(Key_ID id);

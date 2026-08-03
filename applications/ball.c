@@ -44,6 +44,12 @@ static float    s_output_us  = 0.0f;    /* 速度环输出(相对水平点) */
 static float    s_accel_ff   = 0.0f;    /* 小车当前加速度(rpm/秒)，任务层告知 */
 static float    s_curve_ff   = 0.0f;    /* v_avg x 轮速差，用于过弯前馈 */
 
+/* 加速度前馈的增益。是【机构标定常数】而不是任务参数，所以不在 Ball_Tune
+   里，也就不会被 Ball_ResetTune()/Task_Start() 冲掉 —— 起步发生在按下 KEY2
+   之后的头一秒，放进 Ball_Tune 的话运行前标的值根本活不到那个时候。
+   标定方法见 ball.h 的 BALL_FF_US_PER_RPMS */
+static float    s_ff_gain    = BALL_FF_US_PER_RPMS;
+
 static uint32_t s_last_frames  = 0;     /* 上次处理到第几帧 */
 static uint32_t s_last_good_ms = 0;     /* 最近一次采纳帧的时刻 */
 static uint8_t  s_enabled      = 0;
@@ -221,7 +227,7 @@ void Ball_Update(void)
         /* 车往前加速时球相对摆杆向【后】滑(x 增大)，所以要往 x 减小的方向
            预先倾杆，符号取负。前馈不进 s_output_us —— 那个值留给显示，
            代表反馈控制器自己的意图 */
-        out -= BALL_FF_US_PER_RPMS * s_accel_ff;
+        out -= s_ff_gain * s_accel_ff;
 #endif
 #if BALL_FF_CURVE_ENABLE
         out -= BALL_FF_CURVE_GAIN * s_curve_ff;
@@ -307,6 +313,16 @@ void Ball_SetAccelFF(float rpm_per_s)
 void Ball_SetCurveFF(float v_times_diff)
 {
   s_curve_ff = v_times_diff;
+}
+
+void Ball_SetAccelFFGain(float us_per_rpms)
+{
+  s_ff_gain = us_per_rpms;
+}
+
+float Ball_GetAccelFFGain(void)
+{
+  return s_ff_gain;
 }
 
 float Ball_GetPosCm(void)

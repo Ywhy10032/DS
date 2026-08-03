@@ -855,27 +855,35 @@ void App_Run(void)
   {
     s_outer_cnt = 0;
 
-    /* 灰度没通就不许跑，否则会拿着全 0 的数据一头冲出去。
-       静止任务(如任务三)也不能跑外环 —— 否则车会自己沿线开走 */
-    if (Task_IsRunning() && Task_UsesVehicle() && (s_gray_status == HAL_OK))
+    /* 任务自己开车的情况(隐藏的倒车任务)优先：轮速由 Task_GetDriveTargets()
+       直接给出，循迹外环整个让位 —— 倒着走时车头的灰度阵列变成拖在后面的
+       探头，循迹环在这个几何下是正反馈，会越修越歪(详见 task.h 任务七参数区)。
+       顺带也就不依赖灰度了，I2C 挂了照样能把车倒出来 */
+    if (Task_IsRunning() &&
+        !Task_GetDriveTargets(&s_target[MOTOR_LEFT], &s_target[MOTOR_RIGHT]))
     {
-      HAL_StatusTypeDef status;
-
-      Track_Update();
-      Track_GetTargets(&s_target[MOTOR_LEFT], &s_target[MOTOR_RIGHT]);
-
-      status = Track_GetStatus();
-      if (status != s_gray_status)
+      /* 灰度没通就不许跑，否则会拿着全 0 的数据一头冲出去。
+         静止任务(如任务三)也不能跑外环 —— 否则车会自己沿线开走 */
+      if (Task_UsesVehicle() && (s_gray_status == HAL_OK))
       {
-        s_gray_status = status;
-        App_DrawStatus();
+        HAL_StatusTypeDef status;
+
+        Track_Update();
+        Track_GetTargets(&s_target[MOTOR_LEFT], &s_target[MOTOR_RIGHT]);
+
+        status = Track_GetStatus();
+        if (status != s_gray_status)
+        {
+          s_gray_status = status;
+          App_DrawStatus();
+        }
       }
-    }
-    else if (Task_IsRunning())
-    {
-      /* 静止任务：目标转速钉死为 0，速度环会主动把轮子按住不动 */
-      s_target[MOTOR_LEFT]  = 0.0f;
-      s_target[MOTOR_RIGHT] = 0.0f;
+      else
+      {
+        /* 静止任务：目标转速钉死为 0，速度环会主动把轮子按住不动 */
+        s_target[MOTOR_LEFT]  = 0.0f;
+        s_target[MOTOR_RIGHT] = 0.0f;
+      }
     }
 
     /* Task_Update 放在 Track_Update 之后，这样终点判定用的是本拍的新数据 */
