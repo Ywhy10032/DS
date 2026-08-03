@@ -22,6 +22,17 @@ static float    s_offset      = 0.0f;      /* 最近一次的有效偏差 */
 static uint8_t  s_lost        = 0;
 static uint16_t s_lost_ticks  = 0;
 static uint8_t  s_dark_count  = 0;         /* 有多少路探头看到黑色 */
+static uint8_t  s_dark_left   = 0;         /* 其中车体中线【左边】有几路 */
+static uint8_t  s_dark_right  = 0;         /* 中线【右边】有几路 */
+static float    s_line_weight = 0.0f;      /* 八路权重总和(总黑度) */
+
+/* 横线判据的当前门槛。默认是严判据，终点窗口里由任务层放宽 */
+static uint8_t  s_cross_min_ch   = TRACK_CROSS_MIN_CH;
+static float    s_cross_max_off  = TRACK_CROSS_MAX_OFFSET_MM;
+
+/* 峰值保持。车过 A 点只有几拍，实时值根本看不清，靠这两个数事后复盘 */
+static uint8_t  s_dark_peak   = 0;
+static float    s_weight_peak = 0.0f;
 
 static float    s_base_rpm    = TRACK_BASE_RPM;
 static float    s_curve_slow  = TRACK_CURVE_SLOWDOWN;
@@ -44,6 +55,8 @@ static uint8_t Track_Centroid(const uint8_t *values, float *offset)
   float   sum_weight   = 0.0f;
   float   sum_weighted = 0.0f;
   uint8_t dark_count   = 0;
+  uint8_t dark_left    = 0;
+  uint8_t dark_right   = 0;
 
   for (uint8_t i = 0; i < GRAY_CHANNEL_NUM; i++)
   {
@@ -55,7 +68,17 @@ static uint8_t Track_Centroid(const uint8_t *values, float *offset)
 
     if (weight >= TRACK_CROSS_WEIGHT_TH)
     {
-      dark_count++;                 /* 顺手统计有多少路是黑的，用于横线判定 */
+      /* 顺手统计有多少路是黑的、分布在中线哪一侧，两个都用于横线判定 */
+      dark_count++;
+
+      if (s_position_mm[i] < 0.0f)
+      {
+        dark_left++;
+      }
+      else
+      {
+        dark_right++;
+      }
     }
 
     if (weight < TRACK_WEIGHT_NOISE_TH)
@@ -67,7 +90,20 @@ static uint8_t Track_Centroid(const uint8_t *values, float *offset)
     sum_weighted += (float)weight * s_position_mm[i];
   }
 
-  s_dark_count = dark_count;
+  s_dark_count  = dark_count;
+  s_dark_left   = dark_left;
+  s_dark_right  = dark_right;
+  s_line_weight = sum_weight;
+
+  /* 峰值保持：横线只被扫过几拍，实时值肉眼看不住，留下最大值供事后复盘 */
+  if (dark_count > s_dark_peak)
+  {
+    s_dark_peak = dark_count;
+  }
+  if (sum_weight > s_weight_peak)
+  {
+    s_weight_peak = sum_weight;
+  }
 
   if (sum_weight < (float)TRACK_LOST_TH)
   {
@@ -92,6 +128,13 @@ void Track_Init(void)
   s_curve_slow = TRACK_CURVE_SLOWDOWN;
   s_target[0]  = 0.0f;
   s_target[1]  = 0.0f;
+
+  /* 横线判据恢复默认的严门槛。放宽是任务层在终点窗口里临时干的事，
+     每次启动都必须先收回来，否则上一趟放宽的门槛会带到下一趟的全程 */
+  s_cross_min_ch  = TRACK_CROSS_MIN_CH;
+  s_cross_max_off = TRACK_CROSS_MAX_OFFSET_MM;
+
+  Track_ResetCrossPeak();
 }
 
 static float Track_ClampRpm(float rpm)
@@ -204,14 +247,79 @@ uint8_t Track_IsLost(void)
 
 uint8_t Track_IsCrossLine(void)
 {
-  /* 够多路同时黑，且车是对正的 —— 后一条用来把急弯的斜穿排除掉 */
-  return ((s_dark_count >= TRACK_CROSS_MIN_CH) &&
-          (fabsf(s_offset) <= TRACK_CROSS_MAX_OFFSET_MM));
+  uint8_t hit;
+
+  /* ---------- 一票否决：黑簇必须【跨过车体中线】 ----------
+     这是把 A 点横线和弯道斜穿区分开的关键，而且是几何上必然成立的：
+     横线骑在纵线上，车又在跟着纵线走，所以它盖住的那一片必然横跨中线；
+     而弯道里线是甩到一侧去的，黑簇整片偏在左边或右边。
+
+     实测(停车瞬间那一拍的原始数据，权重 = 255-读数，门限 120)：
+       A 点横线    ch1/ch2/ch3 在左 + ch4 在右   -> 跨中线  ✓
+       弯道误判 1  ch5/ch6/ch7 全在右侧          -> 不跨    ✗
+       弯道误判 2  ch4/ch5/ch6 全在右侧          -> 不跨    ✗
+     光看"几路黑"是分不开的(弯道也能凑到 3 路)，看"在哪一侧"一分就开。 */
+  if ((s_dark_left == 0U) || (s_dark_right == 0U))
+  {
+    return 0;
+  }
+
+  /* 再卡姿态：压在横线上时质心不会太远，而急弯里线明显偏向一侧 */
+  if (fabsf(s_offset) > s_cross_max_off)
+  {
+    return 0;
+  }
+
+  /* 判据一：够多路同时黑。姿态正的时候最干净 */
+  hit = (s_dark_count >= s_cross_min_ch);
+
+  /* 判据二：总黑度够大。车带着横摆角压上横线时，各路是先后进入胶带的，
+     同一拍里数不满路数，但"半黑"的探头仍然按比例贡献权重，总和照样上得去
+     —— 这条是给出弯口那种歪着过 A 的姿态兜底的(见 tracking.h 的说明) */
+  /* 阈值填 0 就是关掉这条判据。写成运行时判断而不是 #if —— 预处理器不认
+     浮点比较，编译器自己会把这个常量条件折叠掉，不占运行开销 */
+  if ((TRACK_CROSS_SUM_TH > 0.0f) && (s_line_weight >= TRACK_CROSS_SUM_TH))
+  {
+    hit = 1;
+  }
+
+  return hit;
 }
 
 uint8_t Track_GetDarkCount(void)
 {
   return s_dark_count;
+}
+
+float Track_GetLineWeight(void)
+{
+  return s_line_weight;
+}
+
+void Track_SetCrossGate(uint8_t min_ch, float max_offset_mm)
+{
+  s_cross_min_ch  = min_ch;
+  s_cross_max_off = max_offset_mm;
+}
+
+void Track_ResetCrossPeak(void)
+{
+  /* 用【本拍的实测值】做起点而不是清 0：任务层是在进终点窗口那一拍调用本
+     函数的，而那一拍的灰度数据在此之前就已经算完了(app.c 里 Track_Update()
+     排在 Task_Update() 前面)。清 0 的话，万一就在这一拍判到终点停了车，
+     屏幕上的峰值会显示成 0，反而看不到当时到底是什么数据触发的 */
+  s_dark_peak   = s_dark_count;
+  s_weight_peak = s_line_weight;
+}
+
+uint8_t Track_GetDarkPeak(void)
+{
+  return s_dark_peak;
+}
+
+float Track_GetWeightPeak(void)
+{
+  return s_weight_peak;
 }
 
 const uint8_t *Track_GetRaw(void)

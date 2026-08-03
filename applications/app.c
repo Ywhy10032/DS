@@ -576,10 +576,16 @@ static void App_DrawField(uint8_t field)
   }
   else if (field == APP_FIELD_DARK)
   {
-    /* 有几路探头看到黑色。推着车过 A 点，看这里的峰值就能定横线阈值 */
+    /* 有几路探头看到黑色。
+       运行中显示实时值；停下来显示【峰值】—— 车扫过 A 点只有几拍，实时值
+       根本来不及看，而峰值是任务层在进终点窗口时清零的(见 task.c 的
+       Task_ArmFinishGate)，所以跑完一趟读到的就是"过 A 那一下最多数到几路"。
+       它没到 TASK_CROSS_MIN_CH 就是没停下来的原因，据此调 tracking.h 的
+       TRACK_CROSS_WEIGHT_TH / task.h 的 TASK_CROSS_MIN_CH */
+    uint8_t dk = Task_IsRunning() ? Track_GetDarkCount() : Track_GetDarkPeak();
+
     LCD_SetColor(Track_IsCrossLine() ? LCD_GREEN : LCD_WHITE);
-    LCD_DisplayNumber(APP_DK_VALUE_X, APP_OFF_Y,
-                      (int32_t)Track_GetDarkCount(), APP_DK_VALUE_LEN);
+    LCD_DisplayNumber(APP_DK_VALUE_X, APP_OFF_Y, (int32_t)dk, APP_DK_VALUE_LEN);
   }
   else if (field == APP_FIELD_LRPM)
   {

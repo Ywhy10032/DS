@@ -185,6 +185,28 @@ void Ball_Update(void)
           s_vel_set = -s_tune.vel_limit_cms;
         }
 
+        /* ---------- 刹车限速：按【剩余距离】压住速度指令 ---------- */
+        /* v_cap = sqrt(2 x a x 剩余距离)，即"以恒定减速度 a 刹车、正好在
+           目标处降到 0"所允许的最大速度。指令速度不超过这条曲线，物理上就
+           不存在"冲到目标附近才发现刹不住"的情况 —— 这是提前减速的正解，
+           比事后靠加大 Kd 去压过冲可靠得多(那条路在这个环路延迟下越压越振，
+           见 task.h 里记的教训)。
+           pos_brake_cms2 <= 0 视为关闭这条限速，见 ball.h */
+        if (s_tune.pos_brake_cms2 > 0.0f)
+        {
+          float dist  = fabsf(s_target_cm - s_pos_cm);
+          float v_cap = sqrtf(2.0f * s_tune.pos_brake_cms2 * dist);
+
+          if (s_vel_set > v_cap)
+          {
+            s_vel_set = v_cap;
+          }
+          else if (s_vel_set < -v_cap)
+          {
+            s_vel_set = -v_cap;
+          }
+        }
+
         /* ---------- 内环：速度误差 -> 舵机倾角 ---------- */
         /* 这一级的积分项承担了上一版整套外挂补偿的职责：摩擦、管子下垂、
            水平点残差造成的恒定阻力，全部由它自动累积出对应的常驻倾角 */
@@ -260,31 +282,6 @@ void Ball_Enable(uint8_t on)
   {
     Ball_GoLevel();
   }
-}
-
-void Ball_EnableHolding(uint16_t servo_us)
-{
-  /* 相对水平点的偏移，反解自 Ball_Update() 里那句
-     Servo_SetPulseUs(SERVO_LEVEL_US + BALL_OUTPUT_SIGN * out) */
-  float out = ((float)servo_us - (float)SERVO_LEVEL_US) / BALL_OUTPUT_SIGN;
-
-  /* 清掉两级控制器的历史，但【不动】位置/速度估计 —— 那两个量由
-     Ball_Update() 一直在跟着视觉帧更新(闭环没使能时也在更新，见那边的
-     注释)，此刻是准确的实时值。切换瞬间控制器就知道球真实的位置和速度，
-     不需要重新收敛，这是无扰切换的另一半 */
-  PID_Reset(&s_pos_pid);
-  PID_Reset(&s_vel_pid);
-
-  /* 把速度环积分直接顶到"稳态所需的那份倾角"。不预置的话积分要从 0 慢慢
-     重新累积，这段时间杆是平的，球会先滑走一截才被拉回来 */
-  PID_PresetIntegral(&s_vel_pid, out);
-
-  s_vel_set   = 0.0f;
-  s_output_us = out;
-  s_tracking  = 1;
-  s_enabled   = 1;
-
-  Servo_SetPulseUs(servo_us);
 }
 
 uint8_t Ball_IsEnabled(void)

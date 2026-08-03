@@ -160,77 +160,32 @@ static uint8_t Vofa_ParseLine(const char *line)
       Ball_ResetTune();
       return 1;
 
-    case 'W':
-    {
-      /* 任务三开环三段共用的倾角偏移量(us)，例如 W300。
-         见 task.h 的 Task3_OL_Params.tilt_us / TASK3_OL_TILT_US 的说明 */
-      Task3_OL_Params ol = Task3_GetOLParams();
-      float           us = strtof(p, &end);
-
-      if (end == p) { return 0; }
-      ol.tilt_us = (uint16_t)us;
-      Task3_SetOLParams(&ol);
-      return 1;
-    }
-
-    case 'H':
-    {
-      /* 任务三 -5cm 处标定出的静态稳定角(us)，例如 H1640。
-         见 task.h 的 Task3_OL_Params.hold_minus_us / TASK3_OL_HOLD_MINUS_US */
-      Task3_OL_Params ol = Task3_GetOLParams();
-      float           us = strtof(p, &end);
-
-      if (end == p) { return 0; }
-      ol.hold_minus_us = (uint16_t)us;
-      Task3_SetOLParams(&ol);
-      return 1;
-    }
-
-    case 'J':
-    {
-      /* 任务三开环->闭环的交接窗口【下限】(cm)，例如 J3.0。
-         见 task.h 的 Task3_OL_Params.handoff_cm / TASK3_HANDOFF_CM */
-      Task3_OL_Params ol = Task3_GetOLParams();
-      float           cm = strtof(p, &end);
-
-      if (end == p) { return 0; }
-      ol.handoff_cm = cm;
-      Task3_SetOLParams(&ol);
-      return 1;
-    }
-
     case 'B':
     {
-      /* 任务三估停车距离用的减速度(cm/s²)，例如 B15 —— 交接窗口 = v²/(2B)。
-         调过冲的主旋钮：还冲过头就【调小】(窗口变宽，提前交接留够刹车距离)。
-         见 task.h 的 Task3_OL_Params.brake_accel_cms2 */
-      Task3_OL_Params ol   = Task3_GetOLParams();
-      float           a    = strtof(p, &end);
+      /* 刹车曲线的减速度(cm/s²)，例如 B10.5 —— 速度上限 = sqrt(2 x B x 剩余距离)，
+         提前减速就靠它。0 = 关闭这条限速。
+         调小 = 更早减速、更稳更慢；调大 = 更晚减速、更快但可能冲过目标。
+         见 ball.h 的 BALL_POS_BRAKE_CMS2 / task.h 的 TASK3_BRAKE_ACCEL_CMS2 */
+      Ball_Tune tune = Ball_GetTune();
+      float     a    = strtof(p, &end);
 
-      if ((end == p) || (a <= 0.0f)) { return 0; }   /* 0 会除零，挡掉 */
-      ol.brake_accel_cms2 = a;
-      Task3_SetOLParams(&ol);
+      if ((end == p) || (a < 0.0f)) { return 0; }
+      tune.pos_brake_cms2 = a;
+      Ball_SetTune(&tune);
       return 1;
     }
 
-    case '1':
-    case '2':
-    case '3':
+    case 'V':
     {
-      /* 任务三开环阶段一/二/三的时长(ms)，例如 1300、2500、3300。
-         见 task.h 的 Task3_OL_Params.t1_ms/t2_ms/t3_ms */
-      Task3_OL_Params ol = Task3_GetOLParams();
-      uint32_t        ms = strtoul(p, &end, 10);
+      /* 速度指令上限(cm/s)，例如 V12 —— 见 ball.h 的 BALL_VEL_LIMIT_CMS。
+         注意任务三大部分时间受上面 B 的刹车曲线约束而不是受它约束，
+         想提速优先调 B */
+      Ball_Tune tune  = Ball_GetTune();
+      float     limit = strtof(p, &end);
 
-      if (end == p) { return 0; }
-
-      switch (line[0])
-      {
-        case '1': ol.t1_ms = ms; break;
-        case '2': ol.t2_ms = ms; break;
-        default:  ol.t3_ms = ms; break;
-      }
-      Task3_SetOLParams(&ol);
+      if ((end == p) || (limit <= 0.0f)) { return 0; }
+      tune.vel_limit_cms = limit;
+      Ball_SetTune(&tune);
       return 1;
     }
 

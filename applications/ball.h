@@ -226,6 +226,33 @@
   */
 #define BALL_VEL_LIMIT_CMS      12.0f
 
+/**
+  * ---------------- 刹车限速：按剩余距离压住速度指令(cm/s²) ----------------
+  *
+  *     v_cap = sqrt(2 x a x 剩余距离)
+  *
+  * 物理含义是"以恒定减速度 a 刹车、正好在目标处降到 0"所允许的最大速度。
+  * 只要指令速度不超过这条曲线，球在任何时刻的速度都对应着"剩下的距离刚好
+  * 够刹住"，物理上就不存在"冲到目标附近才发现刹不住"的情况。
+  *
+  * 为什么需要它：光靠位置环的 P 项，速度指令是 Kp x 误差，误差大时会一路顶
+  * 到 vel_limit_cms 匀速冲，直到误差小到 Kp x 误差 < vel_limit 才开始减速 ——
+  * 减速起点由增益偶然决定，不由"还剩多少距离能刹"决定。这套环路又有不小的
+  * 延迟(视觉 60fps + 低通 + 内环收敛)，等指令降下来球还跟不上，就过冲了。
+  * 早期为此把位置环 Kd 从 0.022 一路加到 0.3 想事后压过冲，结果越压越振
+  * (Kd 作用在延迟后的测速信号上，加大等于放大延迟的权重)，那条路是死路，
+  * 教训记在 task.h 的任务三参数区。
+  *
+  * 【0 = 关闭】这条限速，退回纯 Kp 行为。默认关闭：任务四/五/六是"球稳在
+  * 中心"的小幅修正工况，误差本来就小、根本顶不到这条曲线，开不开都一样，
+  * 不如不引入。真正需要它的是任务三那种大位移点到点，由任务层单独打开，
+  * 见 task.h 的 TASK3_BRAKE_ACCEL_CMS2。
+  *
+  * 取值就是"球实际能达到的减速度"，宁可取小(曲线更保守、更早开始减速)：
+  * 取大了曲线接近不限速，等于没开；取小了只是整体变慢，不会失控。
+  */
+#define BALL_POS_BRAKE_CMS2     0.0f
+
 /* ================= 输出与机构 ================= */
 
 /**
@@ -320,6 +347,7 @@ typedef struct
   float pos_kp, pos_ki, pos_kd;     /* 外环：位置误差 -> 速度指令 */
   float pos_i_limit_cms;
   float vel_limit_cms;              /* 速度指令限幅，兼作串级带宽闸门 */
+  float pos_brake_cms2;             /* 刹车限速的减速度，0=关闭，见上方说明 */
 
   float vel_kp, vel_ki, vel_kd;     /* 内环：速度误差 -> 舵机倾角 */
   float vel_i_limit_us;
@@ -331,7 +359,7 @@ typedef struct
 #define BALL_TUNE_DEFAULT_INIT                                  \
 {                                                               \
   BALL_POS_KP, BALL_POS_KI, BALL_POS_KD,                        \
-  BALL_POS_I_LIMIT_CMS, BALL_VEL_LIMIT_CMS,                     \
+  BALL_POS_I_LIMIT_CMS, BALL_VEL_LIMIT_CMS, BALL_POS_BRAKE_CMS2, \
   BALL_VEL_KP, BALL_VEL_KI, BALL_VEL_KD,                        \
   BALL_VEL_I_LIMIT_US, BALL_VEL_I_DEADBAND_CMS,                 \
   BALL_OUTPUT_LIMIT_US                                          \
@@ -358,24 +386,6 @@ void Ball_Update(void);
 /* 使能/停用。停用时舵机回到水平点并清空两级积分 */
 void Ball_Enable(uint8_t on);
 uint8_t Ball_IsEnabled(void);
-
-/**
-  * @brief  无扰切入闭环：使能的同时把输出预置成指定的舵机脉宽
-  * @param  servo_us  切换瞬间要保持的脉宽，通常是事先标定好的某个位置的
-  *                   静态平衡角(如 task.h 的 TASK3_OL_HOLD_MINUS_US)
-  *
-  * @note   与 Ball_Enable(1) 的区别在于【不经过水平点】。Ball_Enable(1) 会
-  *         先把杆放平、积分清零，控制器要花时间重新累积出顶住摩擦/下垂所需
-  *         的倾角，这段时间球会先滑走一截；本函数直接把速度环积分预置到位，
-  *         切换瞬间输出就等于 servo_us，杆不动、球不滑。
-  *
-  *         位置/速度估计不受影响 —— 它们由 Ball_Update() 一直跟着视觉帧
-  *         更新(闭环没使能时也在更新)，切换时已经是准确的实时值。
-  *
-  *         用于开环快速动作跑完之后交接给闭环定点保持的场景，见 task.c
-  *         任务三 TASK3_OL_PHASE3 -> TASK3_CL_HOLD 的交接。
-  */
-void Ball_EnableHolding(uint16_t servo_us);
 
 /* 改目标位置 */
 void Ball_SetTarget(float cm);
