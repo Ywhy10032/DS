@@ -54,6 +54,26 @@ void PID_Reset(PID_Controller *pid)
   pid->first_run        = 1;
 }
 
+void PID_PresetIntegral(PID_Controller *pid, float term)
+{
+  if (pid->ki <= 1e-6f)
+  {
+    return;                    /* 积分项恒为 0，没有可预置的量 */
+  }
+
+  /* 限幅口径与 PID_Update() 保持一致：限的是积分【项】而不是裸积分量 */
+  if (term > pid->integral_limit)
+  {
+    term = pid->integral_limit;
+  }
+  else if (term < -pid->integral_limit)
+  {
+    term = -pid->integral_limit;
+  }
+
+  pid->integral = term / pid->ki;
+}
+
 float PID_Update(PID_Controller *pid, float setpoint, float measurement)
 {
   float error = setpoint - measurement;

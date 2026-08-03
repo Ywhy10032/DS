@@ -186,6 +186,33 @@ static uint8_t Vofa_ParseLine(const char *line)
       return 1;
     }
 
+    case 'J':
+    {
+      /* 任务三开环->闭环的交接窗口【下限】(cm)，例如 J3.0。
+         见 task.h 的 Task3_OL_Params.handoff_cm / TASK3_HANDOFF_CM */
+      Task3_OL_Params ol = Task3_GetOLParams();
+      float           cm = strtof(p, &end);
+
+      if (end == p) { return 0; }
+      ol.handoff_cm = cm;
+      Task3_SetOLParams(&ol);
+      return 1;
+    }
+
+    case 'B':
+    {
+      /* 任务三估停车距离用的减速度(cm/s²)，例如 B15 —— 交接窗口 = v²/(2B)。
+         调过冲的主旋钮：还冲过头就【调小】(窗口变宽，提前交接留够刹车距离)。
+         见 task.h 的 Task3_OL_Params.brake_accel_cms2 */
+      Task3_OL_Params ol   = Task3_GetOLParams();
+      float           a    = strtof(p, &end);
+
+      if ((end == p) || (a <= 0.0f)) { return 0; }   /* 0 会除零，挡掉 */
+      ol.brake_accel_cms2 = a;
+      Task3_SetOLParams(&ol);
+      return 1;
+    }
+
     case '1':
     case '2':
     case '3':

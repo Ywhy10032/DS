@@ -73,4 +73,19 @@ float PID_Update(PID_Controller *pid, float setpoint, float measurement);
 /* 清空积分与微分历史，目标大幅跳变或重新使能执行器时调用 */
 void  PID_Reset(PID_Controller *pid);
 
+/**
+  * @brief  把积分【项】(ki*integral)直接预置成指定值，用于无扰切换
+  * @param  term  期望的积分项输出，量纲与控制器输出一致
+  *
+  * @note   开环/手动控制切到闭环的那一刻，如果积分从 0 起步，控制器要花
+  *         时间重新累积出"顶住恒定阻力所需的那份输出"，这段时间里对象会
+  *         先滑走一截(bump)。已经知道稳态需要多大输出时(比如事先标定好的
+  *         静态平衡角)，用这个函数把积分直接顶到位，切换瞬间输出就等于
+  *         那个已知值，不产生跳变。
+  *
+  *         Ki 为 0 时不做任何事 —— 积分项恒为 0，没有可预置的量。
+  *         预置值同样受 integral_limit 约束。
+  */
+void  PID_PresetIntegral(PID_Controller *pid, float term);
+
 #endif /* __PID_H */

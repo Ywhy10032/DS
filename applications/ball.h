@@ -359,6 +359,24 @@ void Ball_Update(void);
 void Ball_Enable(uint8_t on);
 uint8_t Ball_IsEnabled(void);
 
+/**
+  * @brief  无扰切入闭环：使能的同时把输出预置成指定的舵机脉宽
+  * @param  servo_us  切换瞬间要保持的脉宽，通常是事先标定好的某个位置的
+  *                   静态平衡角(如 task.h 的 TASK3_OL_HOLD_MINUS_US)
+  *
+  * @note   与 Ball_Enable(1) 的区别在于【不经过水平点】。Ball_Enable(1) 会
+  *         先把杆放平、积分清零，控制器要花时间重新累积出顶住摩擦/下垂所需
+  *         的倾角，这段时间球会先滑走一截；本函数直接把速度环积分预置到位，
+  *         切换瞬间输出就等于 servo_us，杆不动、球不滑。
+  *
+  *         位置/速度估计不受影响 —— 它们由 Ball_Update() 一直跟着视觉帧
+  *         更新(闭环没使能时也在更新)，切换时已经是准确的实时值。
+  *
+  *         用于开环快速动作跑完之后交接给闭环定点保持的场景，见 task.c
+  *         任务三 TASK3_OL_PHASE3 -> TASK3_CL_HOLD 的交接。
+  */
+void Ball_EnableHolding(uint16_t servo_us);
+
 /* 改目标位置 */
 void Ball_SetTarget(float cm);
 float Ball_GetTarget(void);

@@ -808,11 +808,17 @@ void App_Run(void)
   Servo_DemoUpdate();                   /* 在 1050~2400us 之间往复摆动 */
 #elif (APP_SERVO_MODE == APP_SERVO_BALL)
   /* 视觉端新增的 target_cm 只在【没有任务在运行】且【本帧确实带了这个字段】
-     时才采用 —— 任务运行中的目标由 task.c 的状态机(如任务三的 +5cm/-5cm
-     折返)或 vofa.c 的 T 指令管理，每帧都用视觉值覆盖会把它们的目标切换打断；
+     时才采用 —— 任务运行中的目标由 task.c 的状态机(如任务三的 -5cm 保持)
+     或 vofa.c 的 T 指令管理，每帧都用视觉值覆盖会把它们的目标切换打断；
      视觉端没发目标的帧(has_target==0)自然也不该拿 0 去瞎设。
-     断链(Vision_IsFresh()==0)时同样不采用，避免拿着陈旧值瞎跑 */
-  if (!Task_IsRunning() && Vision_IsFresh())
+     断链(Vision_IsFresh()==0)时同样不采用，避免拿着陈旧值瞎跑。
+
+     任务三【已完成】的状态要额外排除：它跑完之后计时虽然停了，但闭环还在
+     按着球稳定在 -5cm(规则要求"稳定在该点附近"，见 task.h)，这时候被视觉
+     的目标一覆盖，球就被拽走了，等于把刚拿到的分数丢掉。中途叫停(IDLE)
+     不在此列 —— 那种情况球已经被归位到中心，让视觉接管没问题 */
+  if (!Task_IsRunning() && Vision_IsFresh() &&
+      !((Task_GetId() == TASK_3) && (Task_GetState() == TASK_STATE_DONE)))
   {
     const Vision_Ball *vb = Vision_GetBall();
 

@@ -34,12 +34,14 @@ static uint32_t s_split_ms     = 0;          /* 到达评分点的用时，0 = �
 static uint8_t  s_lap_done     = 0;          /* 任务五/六：整圈已跑完 */
 static uint32_t s_lap_done_ms  = 0;          /* 通过 A 的时刻，用来算滑行时长 */
 
-/* 任务三改成开环定时定角度，见 task.h 顶部任务三参数区的说明 */
+/* 任务三：开环快速动作 + 到 -5cm 后交接给闭环定点保持，
+   见 task.h 顶部任务三参数区的说明 */
 typedef enum
 {
   TASK3_OL_PHASE1 = 0,    /* 正偏移，加速冲向 +5cm */
   TASK3_OL_PHASE2,        /* 负偏移，先刹住向 +5cm 的速度，再加速冲向 -5cm */
-  TASK3_OL_PHASE3         /* 正偏移，刹住冲向 -5cm 的速度 */
+  TASK3_OL_PHASE3,        /* 正偏移，刹住冲向 -5cm 的速度 */
+  TASK3_CL_HOLD           /* 开环跑完，闭环接管，把球稳在 -5cm */
 } Task3_Phase;
 
 static Task3_Phase s_t3_phase    = TASK3_OL_PHASE1;
@@ -162,10 +164,25 @@ static void Task_Start(void)
     Track_SetBaseSpeed(0.0f);
     Servo_DemoInit();
   }
-  /* 任务三：车不动，摆杆按标定好的时长/角度表开环摆动，不再用视觉闭环——
+  /* 任务三：开环三段跑位 + 到 -5cm 附近交接给闭环保持——
      原因和标定方法见 task.h 顶部任务三参数区的说明 */
   else if (s_task == TASK_3)
   {
+    /* 装载保持段专用的球杆增益。现在装是因为上面刚 Ball_ResetTune() 过，
+       晚装会被冲掉；开环这几段本来就不读球杆参数，提前装不影响它们。
+       见 task.h 的 TASK3_HOLD_* —— 那组和任务四/五/六共用的全局默认值
+       刻意不同，两边工况完全不一样 */
+    Ball_Tune tune = BALL_TUNE_DEFAULT_INIT;
+
+    tune.pos_kp = TASK3_HOLD_POS_KP;
+    tune.pos_ki = TASK3_HOLD_POS_KI;
+    tune.pos_kd = TASK3_HOLD_POS_KD;
+    tune.vel_kp = TASK3_HOLD_VEL_KP;
+    tune.vel_ki = TASK3_HOLD_VEL_KI;
+    tune.vel_kd = TASK3_HOLD_VEL_KD;
+
+    Ball_SetTune(&tune);
+
     /* 球杆闭环让位：开环这段全程自己直接写舵机脉宽，和闭环同时开就是
        互相抢舵机，与任务一摆动演示的道理一样(见那边的注释)。这里不用
        像任务一那样存下 Ball_IsEnabled() 再还回去——切到任何其它载球任务
@@ -209,6 +226,18 @@ static void Task_Finish(Task_State end_state)
   {
     Servo_SetPulseUs(SERVO_LEVEL_US);
     Ball_Enable(s_t1_ball_en);
+  }
+
+  /* 任务三在开环阶段被中途叫停(KEY2 / S 指令 / 时间兜底)：此刻杆还硬倾着，
+     没人管的话球会一路滚到管子尽头。把闭环接回来接住它，顺便归位到中心，
+     正好是下一次重试需要的起始状态。
+     正常跑完的路径不会走到这里的分支 —— 那时 CL_HOLD 已经把闭环打开并
+     按着球了，Ball_IsEnabled() 为真，绝不能碰它，否则等于把辛苦稳住的球
+     重新推回中心 */
+  if ((s_task == TASK_3) && !Ball_IsEnabled())
+  {
+    Ball_SetTarget(TASK3_CENTER_CM);
+    Ball_Enable(1);
   }
 
   Track_Stop();
@@ -265,9 +294,53 @@ static void Task2_Run(void)
 }
 
 /**
-  * @brief  任务三：开环按标定好的时长/角度表摆舵机，把球从中心送到 +5cm、
-  *         折返、再送到 -5cm 并稳住
-  * @note   不再用视觉闭环——放弃闭环的原因、三段动作的含义、标定方法
+  * @brief  球是否已经进了开环->闭环的交接窗口
+  * @note   窗口【随球速自适应】，不是一个固定距离 —— 交接后闭环要在剩下这段
+  *         距离里把球停住，需要多少距离取决于球此刻有多快(停车距离 v²/2a)。
+  *         球快就提前交接给足刹车距离，球慢就晚点交接多让开环走一段。
+  *         固定值调不出来：按快球标的窗口对慢球太早，按慢球标的对快球不够
+  *         用，而每趟的进窗速度本来就会随摩擦/电量浮动。见 task.h 的
+  *         TASK3_BRAKE_ACCEL_CMS2。
+  */
+static uint8_t Task3_InHandoffWindow(void)
+{
+  float dist = fabsf(Ball_GetPosCm() - TASK3_MINUS_CM);
+  float vel  = fabsf(Ball_GetVelCmS());
+  float need = (vel * vel) / (2.0f * s_t3_ol.brake_accel_cms2);
+
+  /* handoff_cm 是窗口下限：球已经很慢时上面算出来的距离趋近于 0，
+     不兜一下会一直等到贴着目标才交接，等于没给闭环留修正余地 */
+  if (need < s_t3_ol.handoff_cm)
+  {
+    need = s_t3_ol.handoff_cm;
+  }
+
+  return (dist <= need);
+}
+
+/**
+  * @brief  把控制权从开环交给闭环，之后由闭环把球稳在 -5cm
+  * @note   用 Ball_EnableHolding() 而不是 Ball_Enable(1)：后者会先把杆放平、
+  *         积分清零，控制器要花时间重新累积出顶住摩擦的倾角，球在那段时间里
+  *         会先滑走一截；前者直接把速度环积分预置成标定好的静态平衡角，
+  *         切换瞬间杆不动，见 ball.h 的说明
+  */
+static void Task3_Handoff(void)
+{
+  Ball_SetTarget(TASK3_MINUS_CM);
+  Ball_EnableHolding(s_t3_ol.hold_minus_us);
+
+  s_t3_phase    = TASK3_CL_HOLD;
+  s_t3_phase_t0 = HAL_GetTick();
+
+  /* 评分看的是"跑完全程"的用时，就是够到 -5cm 的这一刻 */
+  s_split_ms = s_elapsed_ms;
+}
+
+/**
+  * @brief  任务三：开环三段把球从中心甩到 +5cm 再折返到 -5cm，
+  *         到位后交接给闭环把它焊死在 -5cm
+  * @note   为什么大位移用开环、保持用闭环，以及三段动作的含义和标定方法，
   *         全部写在 task.h 顶部任务三参数区，改这里之前先看那边。
   */
 static void Task3_Run(void)
@@ -286,7 +359,13 @@ static void Task3_Run(void)
       break;
 
     case TASK3_OL_PHASE2:
-      if (dt >= s_t3_ol.t2_ms)
+      /* 阶段二也要检查交接窗口：窗口开得比较大时，球可能在 T2 还没走完就
+         已经够近了，这时候再让阶段二接着加速就是把球往过头的方向推 */
+      if (Task3_InHandoffWindow())
+      {
+        Task3_Handoff();
+      }
+      else if (dt >= s_t3_ol.t2_ms)
       {
         s_t3_phase    = TASK3_OL_PHASE3;
         s_t3_phase_t0 = HAL_GetTick();
@@ -294,16 +373,26 @@ static void Task3_Run(void)
       }
       break;
 
-    default:    /* TASK3_OL_PHASE3 */
-      if (dt >= s_t3_ol.t3_ms)
+    case TASK3_OL_PHASE3:
+      /* 交接判据：球进了目标附近的窗口就立刻交给闭环，不等 T3 走完 ——
+         位置判据比定时判据准得多(定时会随摩擦/电量漂移)。
+         T3 退化成兜底上限：万一球没进窗口(开环参数没标好、球被卡住)，
+         到点也得交接，不能一直硬倾着杆 */
+      if (Task3_InHandoffWindow() || (dt >= s_t3_ol.t3_ms))
       {
-        /* 三段动作跑完，切到 -5cm 处标定好的静态稳定角，把球定住。
-           开环没有反馈，评分只能看这一下标得准不准 */
-        Servo_SetPulseUs(s_t3_ol.hold_minus_us);
+        Task3_Handoff();
+      }
+      break;
 
-        /* 评分看的是"跑完全程"的用时，就是三段动作结束的这一刻 */
-        s_split_ms = s_elapsed_ms;
-
+    default:    /* TASK3_CL_HOLD：闭环已接管，等它稳住 */
+      if (fabsf(Ball_GetPosCm() - TASK3_MINUS_CM) > TASK3_ARRIVE_CM)
+      {
+        s_t3_phase_t0 = HAL_GetTick();     /* 又跑出去了，重新计时 */
+      }
+      else if (dt >= TASK3_SETTLE_MS)
+      {
+        /* 稳住了。任务结束但【不关闭球杆闭环】—— 规则要求"稳定在该点附近"，
+           松手就散的话不算稳定，所以这里只停计时，闭环继续按着球 */
         Task_Finish(TASK_STATE_DONE);
         return;
       }

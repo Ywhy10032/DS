@@ -262,6 +262,31 @@ void Ball_Enable(uint8_t on)
   }
 }
 
+void Ball_EnableHolding(uint16_t servo_us)
+{
+  /* 相对水平点的偏移，反解自 Ball_Update() 里那句
+     Servo_SetPulseUs(SERVO_LEVEL_US + BALL_OUTPUT_SIGN * out) */
+  float out = ((float)servo_us - (float)SERVO_LEVEL_US) / BALL_OUTPUT_SIGN;
+
+  /* 清掉两级控制器的历史，但【不动】位置/速度估计 —— 那两个量由
+     Ball_Update() 一直在跟着视觉帧更新(闭环没使能时也在更新，见那边的
+     注释)，此刻是准确的实时值。切换瞬间控制器就知道球真实的位置和速度，
+     不需要重新收敛，这是无扰切换的另一半 */
+  PID_Reset(&s_pos_pid);
+  PID_Reset(&s_vel_pid);
+
+  /* 把速度环积分直接顶到"稳态所需的那份倾角"。不预置的话积分要从 0 慢慢
+     重新累积，这段时间杆是平的，球会先滑走一截才被拉回来 */
+  PID_PresetIntegral(&s_vel_pid, out);
+
+  s_vel_set   = 0.0f;
+  s_output_us = out;
+  s_tracking  = 1;
+  s_enabled   = 1;
+
+  Servo_SetPulseUs(servo_us);
+}
+
 uint8_t Ball_IsEnabled(void)
 {
   return s_enabled;
