@@ -25,6 +25,7 @@
 #include "ball.h"
 #include "vofa.h"
 #include "battery.h"
+#include "buzzer.h"
 
 #include <math.h>
 
@@ -708,6 +709,10 @@ static void App_ShowPage(void)
 
 void App_Init(void)
 {
+  /* ---------- 蜂鸣器：开机响一声，提示上电自检开始 ---------- */
+  Buzzer_Init();
+  Buzzer_Beep(BUZZER_BOOT_BEEP_MS);
+
   /* ---------- LCD ---------- */
   SPI_LCD_Init();
   LCD_SetDirection(Direction_V_Flip);   /* 竖屏 240x320，整屏旋转 180 度 */
