@@ -104,18 +104,19 @@ void Ball_Init(void)
   Ball_GoLevel();
 }
 
+/**
+  * @note   位置/速度估计不受 s_enabled 影响，闭环关掉时(比如任务三改成
+  *         开环定时定角度运行期间)仍然照常更新——vofa 画图、离线标定都
+  *         要靠这份实时位置，不能因为没开闭环就停更新。只有下面 PID 解算
+  *         和写舵机脉宽这一段才真正受 s_enabled 门控，避免和外部直接调用
+  *         Servo_SetPulseUs() 的代码(如任务三开环)互相抢舵机。
+  */
 void Ball_Update(void)
 {
-  uint32_t now = HAL_GetTick();
-  uint32_t frames;
+  uint32_t now    = HAL_GetTick();
+  uint32_t frames = Vision_GetFrameCount();
 
-  if (!s_enabled)
-  {
-    return;
-  }
-
-  /* ---------- 只在收到新帧时跑控制 ---------- */
-  frames = Vision_GetFrameCount();
+  /* ---------- 只在收到新帧时更新位置/速度估计 ---------- */
   if (frames != s_last_frames)
   {
     const Vision_Ball *b = Vision_GetBall();
@@ -125,7 +126,6 @@ void Ball_Update(void)
     if ((b->valid != 0U) && (b->confidence >= BALL_MIN_CONFIDENCE))
     {
       float dt = (float)(now - s_last_good_ms) / 1000.0f;
-      float out;
 
       /* 视觉端卡顿或刚上电时 dt 会异常，不夹住微分项会算出天文数字 */
       if (dt < BALL_DT_MIN_S)
@@ -157,57 +157,65 @@ void Ball_Update(void)
       }
       s_prev_pos_cm = s_pos_cm;
 
-      /* ---------- 外环：位置误差 -> 速度指令 ---------- */
-      /* Kd 传 0，微分项在下面手工加 —— PID 内部是对测量值做原始差分，
-         而位置的原始差分正是噪声最大的那个量；我们手上已经有滤波过的
-         速度估计 s_vel_cm_s，直接用它做微分项，信号质量好得多。
-         位置环微分 = -Kd x d(位置)/dt，而 d(位置)/dt 就是球速，
-         所以这一项就是 -pos_kd * s_vel_cm_s。 */
-      PID_SetTunings(&s_pos_pid, s_tune.pos_kp, s_tune.pos_ki, 0.0f);
-      s_pos_pid.dt = dt;
-      s_vel_set = PID_Update(&s_pos_pid, s_target_cm, s_pos_cm)
-                  - (s_tune.pos_kd * s_vel_cm_s);
-
-      /* 手工加完微分要重新限幅：PID_Update() 内部那次限幅管不到这一项。
-         这个限幅同时是串级的带宽闸门 —— 外环不许要求内环做到它做不到的
-         速度，见 ball.h 的 BALL_VEL_LIMIT_CMS */
-      if (s_vel_set > s_tune.vel_limit_cms)
+      /* ---------- 闭环控制：只在使能时才算、才写舵机 ---------- */
+      if (s_enabled)
       {
-        s_vel_set = s_tune.vel_limit_cms;
-      }
-      else if (s_vel_set < -s_tune.vel_limit_cms)
-      {
-        s_vel_set = -s_tune.vel_limit_cms;
-      }
+        float out;
 
-      /* ---------- 内环：速度误差 -> 舵机倾角 ---------- */
-      /* 这一级的积分项承担了上一版整套外挂补偿的职责：摩擦、管子下垂、
-         水平点残差造成的恒定阻力，全部由它自动累积出对应的常驻倾角 */
-      PID_SetTunings(&s_vel_pid, s_tune.vel_kp, s_tune.vel_ki, s_tune.vel_kd);
-      s_vel_pid.dt = dt;
-      s_output_us = PID_Update(&s_vel_pid, s_vel_set, s_vel_cm_s);
+        /* ---------- 外环：位置误差 -> 速度指令 ---------- */
+        /* Kd 传 0，微分项在下面手工加 —— PID 内部是对测量值做原始差分，
+           而位置的原始差分正是噪声最大的那个量；我们手上已经有滤波过的
+           速度估计 s_vel_cm_s，直接用它做微分项，信号质量好得多。
+           位置环微分 = -Kd x d(位置)/dt，而 d(位置)/dt 就是球速，
+           所以这一项就是 -pos_kd * s_vel_cm_s。 */
+        PID_SetTunings(&s_pos_pid, s_tune.pos_kp, s_tune.pos_ki, 0.0f);
+        s_pos_pid.dt = dt;
+        s_vel_set = PID_Update(&s_pos_pid, s_target_cm, s_pos_cm)
+                    - (s_tune.pos_kd * s_vel_cm_s);
 
-      /* ---------- 小车运动的前馈 ---------- */
-      out = s_output_us;
+        /* 手工加完微分要重新限幅：PID_Update() 内部那次限幅管不到这一项。
+           这个限幅同时是串级的带宽闸门 —— 外环不许要求内环做到它做不到的
+           速度，见 ball.h 的 BALL_VEL_LIMIT_CMS */
+        if (s_vel_set > s_tune.vel_limit_cms)
+        {
+          s_vel_set = s_tune.vel_limit_cms;
+        }
+        else if (s_vel_set < -s_tune.vel_limit_cms)
+        {
+          s_vel_set = -s_tune.vel_limit_cms;
+        }
+
+        /* ---------- 内环：速度误差 -> 舵机倾角 ---------- */
+        /* 这一级的积分项承担了上一版整套外挂补偿的职责：摩擦、管子下垂、
+           水平点残差造成的恒定阻力，全部由它自动累积出对应的常驻倾角 */
+        PID_SetTunings(&s_vel_pid, s_tune.vel_kp, s_tune.vel_ki, s_tune.vel_kd);
+        s_vel_pid.dt = dt;
+        s_output_us = PID_Update(&s_vel_pid, s_vel_set, s_vel_cm_s);
+
+        /* ---------- 小车运动的前馈 ---------- */
+        out = s_output_us;
 
 #if BALL_FF_ENABLE
-      /* 车往前加速时球相对摆杆向【后】滑(x 增大)，所以要往 x 减小的方向
-         预先倾杆，符号取负。前馈不进 s_output_us —— 那个值留给显示，
-         代表反馈控制器自己的意图 */
-      out -= BALL_FF_US_PER_RPMS * s_accel_ff;
+        /* 车往前加速时球相对摆杆向【后】滑(x 增大)，所以要往 x 减小的方向
+           预先倾杆，符号取负。前馈不进 s_output_us —— 那个值留给显示，
+           代表反馈控制器自己的意图 */
+        out -= BALL_FF_US_PER_RPMS * s_accel_ff;
 #endif
 #if BALL_FF_CURVE_ENABLE
-      out -= BALL_FF_CURVE_GAIN * s_curve_ff;
+        out -= BALL_FF_CURVE_GAIN * s_curve_ff;
 #endif
 
-      Servo_SetPulseUs((uint16_t)(SERVO_LEVEL_US +
-                                  (int16_t)(BALL_OUTPUT_SIGN * out)));
-      s_tracking = 1;
+        Servo_SetPulseUs((uint16_t)(SERVO_LEVEL_US +
+                                    (int16_t)(BALL_OUTPUT_SIGN * out)));
+        s_tracking = 1;
+      }
     }
   }
 
   /* ---------- 掉帧保护 ---------- */
-  if ((now - s_last_good_ms) > BALL_TIMEOUT_MS)
+  /* 只在闭环使能时才管舵机——没使能时舵机本来就不归这里管(比如任务三的
+     开环状态机在自己写)，掉帧了也不该由这里把它拽回水平点 */
+  if (s_enabled && ((now - s_last_good_ms) > BALL_TIMEOUT_MS))
   {
     Ball_GoLevel();
   }

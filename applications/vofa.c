@@ -160,6 +160,53 @@ static uint8_t Vofa_ParseLine(const char *line)
       Ball_ResetTune();
       return 1;
 
+    case 'W':
+    {
+      /* 任务三开环三段共用的倾角偏移量(us)，例如 W300。
+         见 task.h 的 Task3_OL_Params.tilt_us / TASK3_OL_TILT_US 的说明 */
+      Task3_OL_Params ol = Task3_GetOLParams();
+      float           us = strtof(p, &end);
+
+      if (end == p) { return 0; }
+      ol.tilt_us = (uint16_t)us;
+      Task3_SetOLParams(&ol);
+      return 1;
+    }
+
+    case 'H':
+    {
+      /* 任务三 -5cm 处标定出的静态稳定角(us)，例如 H1640。
+         见 task.h 的 Task3_OL_Params.hold_minus_us / TASK3_OL_HOLD_MINUS_US */
+      Task3_OL_Params ol = Task3_GetOLParams();
+      float           us = strtof(p, &end);
+
+      if (end == p) { return 0; }
+      ol.hold_minus_us = (uint16_t)us;
+      Task3_SetOLParams(&ol);
+      return 1;
+    }
+
+    case '1':
+    case '2':
+    case '3':
+    {
+      /* 任务三开环阶段一/二/三的时长(ms)，例如 1300、2500、3300。
+         见 task.h 的 Task3_OL_Params.t1_ms/t2_ms/t3_ms */
+      Task3_OL_Params ol = Task3_GetOLParams();
+      uint32_t        ms = strtoul(p, &end, 10);
+
+      if (end == p) { return 0; }
+
+      switch (line[0])
+      {
+        case '1': ol.t1_ms = ms; break;
+        case '2': ol.t2_ms = ms; break;
+        default:  ol.t3_ms = ms; break;
+      }
+      Task3_SetOLParams(&ol);
+      return 1;
+    }
+
     case 'N':
     {
       uint32_t n = strtoul(p, &end, 10);   /* 发几就是任务几，1~6，没有任务 0 */
