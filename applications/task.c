@@ -161,11 +161,12 @@ static void Task_Start(void)
   /* 任务三：车不动，摆杆先把球送到 +5cm */
   else if (s_task == TASK_3)
   {
-    /* 装载任务三专用的球杆参数 —— 串级之后只剩速度上限这一项需要单独调，
-       见 task.h 的 TASK3_BALL_VEL_LIMIT_CMS */
+    /* 装载任务三专用的球杆参数：速度上限和 GO_PLUS 逼近段的阻尼都要单独调，
+       见 task.h 的 TASK3_BALL_VEL_LIMIT_CMS / TASK3_BALL_PLUS_POS_KD */
     Ball_Tune tune = BALL_TUNE_DEFAULT_INIT;
 
     tune.vel_limit_cms = TASK3_BALL_VEL_LIMIT_CMS;
+    tune.pos_kd        = TASK3_BALL_PLUS_POS_KD;
 
     Ball_SetTune(&tune);
 
