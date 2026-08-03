@@ -596,20 +596,6 @@ void Task_Go(void)
     return;
   }
 
-  /* 任务三开环运行的前提是"从中心 O 静止起步"，球没真正居中就开跑，
-     标定出的三段时长/角度全部对不上——球没到位就直接忽略这次启动，
-     等 Task_SetId() 挂的闭环把它拉回中心附近再重试。见 task.h 里
-     TASK3_START_ARRIVE_CM 的说明 */
-  if (s_task == TASK_3)
-  {
-    float err = fabsf(Ball_GetPosCm() - TASK3_CENTER_CM);
-
-    if (!Ball_IsTracking() || (err >= TASK3_START_ARRIVE_CM))
-    {
-      return;
-    }
-  }
-
   Task_Start();
 }
 
