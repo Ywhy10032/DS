@@ -19,11 +19,10 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "usart.h"
-#include "vision.h"
-#include "vofa.h"
 
 /* USER CODE BEGIN 0 */
-
+#include "vision.h"
+#include "vofa.h"
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart4;

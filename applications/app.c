@@ -24,6 +24,7 @@
 #include "vision.h"
 #include "ball.h"
 #include "vofa.h"
+#include "battery.h"
 
 #include <math.h>
 
@@ -68,6 +69,16 @@
 #define APP_RPM_L_X         14
 #define APP_RPM_R_X         126
 #define APP_RPM_VALUE_LEN   4
+
+/* 电压显示：常驻角标，不属于任何一页，翻页清屏后也要留着。
+   App_Init() 里用 Direction_V_Flip 把整屏转了 180 度，逻辑坐标原点
+   (左上角)转出来正是用户看到的物理右下角，所以就近画在逻辑 (0,0) 附近 */
+#define APP_BATT_FONT       ASCII_Font16
+#define APP_BATT_FONT_W     8
+#define APP_BATT_X          4
+#define APP_BATT_Y          4
+#define APP_BATT_VALUE_X    (APP_BATT_X + 4 * APP_BATT_FONT_W)
+#define APP_BATT_VALUE_LEN  5
 
 /* 偏差与"几路黑"共用一行，DK 用来现场标定横线阈值 */
 #define APP_OFF_VALUE_LEN   6
@@ -421,6 +432,36 @@ static void App_DrawStatus(void)
 }
 
 /**
+  * @brief  电压角标：标签只需画一次，翻页清屏后跟着页面布局重画
+  */
+static void App_DrawBatteryLabel(void)
+{
+  LCD_SetAsciiFont(&APP_BATT_FONT);
+  LCD_SetColor(LCD_WHITE);
+  LCD_DisplayString(APP_BATT_X, APP_BATT_Y, "BAT:");
+}
+
+/**
+  * @brief  电压角标：数值部分，跟 App_DrawTime() 同一个 100ms 节拍刷新
+  */
+static void App_DrawBatteryValue(void)
+{
+  uint32_t color;
+
+  switch (Battery_GetLevel())
+  {
+    case BATTERY_LEVEL_LOW:   color = LCD_RED;    break;
+    case BATTERY_LEVEL_WARN:  color = LCD_YELLOW; break;
+    default:                  color = LCD_WHITE;  break;
+  }
+
+  LCD_SetAsciiFont(&APP_BATT_FONT);
+  LCD_SetColor(color);
+  LCD_DisplayDecimals(APP_BATT_VALUE_X, APP_BATT_Y,
+                      (double)Battery_GetVoltage(), APP_BATT_VALUE_LEN, 2);
+}
+
+/**
   * @brief  计时显示，秒 + 两位小数
   * @note   任务四/五到达评分点后改显示锁存的分段时间并标青色 ——
   *         任务四是 A->B(≤8s)、任务五是整圈到 A(≤30s)。行驶总时间还包含
@@ -644,6 +685,9 @@ static void App_ShowPage(void)
   s_draw_field = 0;
   s_draw_cnt   = 0;
 
+  App_DrawBatteryLabel();
+  App_DrawBatteryValue();
+
   if (s_page == APP_PAGE_PID)
   {
     App_DrawPidLayout();
@@ -683,6 +727,9 @@ void App_Init(void)
   /* ---------- 灰度传感器 ---------- */
   s_gray_status = Gray_Init();
   App_DrawStatus();
+
+  /* ---------- 电压检测 ---------- */
+  Battery_Init();
 
   /* ---------- 电机与编码器 ---------- */
   Motor_Init();
@@ -845,6 +892,8 @@ void App_Run(void)
   {
     s_time_cnt = 0;
     App_DrawTime();
+    Battery_Update();
+    App_DrawBatteryValue();
   }
 
   s_draw_cnt++;

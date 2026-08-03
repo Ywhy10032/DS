@@ -62,6 +62,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     applications/vision.c
     applications/ball.c
     applications/vofa.c
+    applications/battery.c
 
     # Add user sources here
 )
