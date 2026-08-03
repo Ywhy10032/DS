@@ -41,9 +41,10 @@ typedef enum
   TASK3_SETTLING          /* 已够到 -5cm，等它稳住 */
 } Task3_Phase;
 
-static Task3_Phase s_t3_phase    = TASK3_GO_PLUS;
+static Task3_Phase s_t3_phase     = TASK3_GO_PLUS;
 static uint32_t    s_t3_settle_ms = 0;       /* 进入容差圈的时刻 */
-static uint32_t    s_t3_arrive_ms = 0;       /* GO_PLUS 阶段进入位置容差圈的时刻，0=还没进 */
+static uint32_t    s_t3_plus_t0   = 0;       /* GO_PLUS 阶段起始时刻，给超时兜底计时 */
+static uint8_t     s_t3_seen_move = 0;       /* GO_PLUS：球是否已经跑起来了(过零检测上膛) */
 
 /* 任务一：进入前球杆闭环是否开着，结束时原样还回去。
    舵机脉宽只有一个出口，摆动演示跑起来时球杆闭环必须让位，
@@ -172,7 +173,8 @@ static void Task_Start(void)
 
     s_t3_phase     = TASK3_GO_PLUS;
     s_t3_settle_ms = HAL_GetTick();
-    s_t3_arrive_ms = 0;
+    s_t3_plus_t0   = HAL_GetTick();
+    s_t3_seen_move = 0;
 
     Track_SetBaseSpeed(0.0f);
     Ball_SetTarget(TASK3_PLUS_CM);
@@ -265,11 +267,13 @@ static void Task2_Run(void)
 
 /**
   * @brief  任务三：小车静止，摆杆把球送到 +5cm、折返、再送到 -5cm 并稳住
-  * @note   到达 +5cm 时不做完整停稳，但也不能【完全不管速度】就立刻折返——
-  *         实测 4 次真实任务三，3 次超过 5s，波形显示是折返时球还带着明显
-  *         速度，反向的目标叠加原有动能，冲得更远、荡得更久，时间大头花在
-  *         折返后的振荡拖尾上，不是花在赶路上。改成"位置够近 且 速度够慢"
-  *         才折返，用 TASK3_REVERSE_WAIT_MAX_MS 兜底避免极端情况下等不到。
+  * @note   折返时机用"速度过零"检测：GO_PLUS 逼近 +5cm 是一段欠阻尼响应，
+  *         球速度最低点就在它自己轨迹的顶点(超调最远处)附近，"等速度够慢"
+  *         这种判据对振荡中的轨迹天然会等到最偏的位置才触发。改成直接抓
+  *         "速度从正变成 ≤0"这一刻——那正是球真正掉头的瞬间，比等幅值降到
+  *         阈值以下更早、更准。TASK3_MOVE_VEL_CMS 只是给这个检测上膛，
+  *         防止起步瞬间的速度噪声被误判成"已经掉头"。TASK3_GO_PLUS_TIMEOUT_MS
+  *         兜底极端情况(球被卡住、一直不过零)。见 task.h 对应常量的推导。
   */
 static void Task3_Run(void)
 {
@@ -279,20 +283,15 @@ static void Task3_Run(void)
   {
     case TASK3_GO_PLUS:
     {
-      uint8_t pos_ok = (err <= TASK3_ARRIVE_CM);
+      float vel = Ball_GetVelCmS();
 
-      if (!pos_ok)
+      if (!s_t3_seen_move && (vel >= TASK3_MOVE_VEL_CMS))
       {
-        s_t3_arrive_ms = 0;      /* 还没到容差圈，清零 */
-      }
-      else if (s_t3_arrive_ms == 0U)
-      {
-        s_t3_arrive_ms = HAL_GetTick();    /* 刚进容差圈，记下时刻 */
+        s_t3_seen_move = 1;     /* 确认球真的跑起来了，过零检测正式上膛 */
       }
 
-      if (pos_ok &&
-          ((fabsf(Ball_GetVelCmS()) <= TASK3_REVERSE_VEL_CMS) ||
-           ((HAL_GetTick() - s_t3_arrive_ms) >= TASK3_REVERSE_WAIT_MAX_MS)))
+      if ((s_t3_seen_move && (vel <= 0.0f)) ||
+          ((HAL_GetTick() - s_t3_plus_t0) >= TASK3_GO_PLUS_TIMEOUT_MS))
       {
         s_t3_phase = TASK3_GO_MINUS;
         /* 串级下不再需要瞄准偏置去补稳态残差 —— 那是速度环积分的职责，
