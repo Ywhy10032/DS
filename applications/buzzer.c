@@ -13,7 +13,7 @@
 
 void Buzzer_Init(void)
 {
-  /* 上电先确保 PWM 是关的，蜂鸣器保持静音，等 Buzzer_Beep() 主动响 */
+  /* 初始化时保持 PWM 关闭 */
   HAL_TIM_PWM_Stop(BUZZER_TIM_HANDLE, BUZZER_TIM_CHANNEL);
 }
 

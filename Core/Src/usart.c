@@ -193,12 +193,7 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 
 /* USER CODE BEGIN 1 */
 
-/**
-  * HAL_UART_RxCpltCallback / HAL_UART_ErrorCallback / HAL_UART_TxCpltCallback
-  * 是 HAL 的弱回调，全工程只能各有一份定义，而 UART4(vision.c) 和
-  * USART1(vofa.c) 都要用中断收发 —— 所以真正的回调集中放在这里，按
-  * huart->Instance 分发给各自模块自己的处理函数，两个模块互不感知对方存在。
-  */
+/* 按串口实例将 HAL 弱回调分发给视觉和 VOFA+ 模块。 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == UART4)

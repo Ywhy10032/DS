@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file           : battery.c
-  * @brief          : 电源电压检测 —— ADC1 软件触发单次转换 + 一阶低通
+  * @brief          : ADC1 电池电压采样与低通滤波
   ******************************************************************************
   */
 
@@ -11,9 +11,9 @@
 #define BATTERY_ADC_VREF        3.3f
 #define BATTERY_ADC_MAX         4095.0f
 #define BATTERY_DIVIDER_RATIO   11.0f    /* (100k+10k)/10k */
-#define BATTERY_LPF_ALPHA       0.1f     /* 一阶低通系数，压掉 ADC 采样抖动 */
+#define BATTERY_LPF_ALPHA       0.1f     /* 一阶低通系数 */
 
-/* 3S 锂电池报警阈值：先黄后红，两级预警 */
+/* 三节锂电池报警阈值 */
 #define BATTERY_WARN_VOLTAGE    11.5f
 #define BATTERY_LOW_VOLTAGE     11.3f
 
@@ -27,7 +27,7 @@ static float Battery_ReadRaw(void)
   if (HAL_ADC_PollForConversion(&hadc1, 10) != HAL_OK)
   {
     HAL_ADC_Stop(&hadc1);
-    return s_voltage;                  /* 超时就沿用上次的值，不显示垃圾数 */
+    return s_voltage;                  /* 转换超时时保留上次结果 */
   }
   raw = HAL_ADC_GetValue(&hadc1);
   HAL_ADC_Stop(&hadc1);

@@ -57,24 +57,21 @@ HAL_StatusTypeDef Gray_Init(void)
 {
   HAL_StatusTypeDef status;
 
-  /* ---------- 1. ping 同步，等传感器上电就绪 ---------- */
+  /* 等待传感器就绪 */
   status = Gray_WaitReady();
   if (status != HAL_OK)
   {
     return status;
   }
 
-  /* ---------- 2. 8 路传输通道全部使能 ---------- */
-  /* 默认值本来就是 0xFF，显式写一次更保险 */
+  /* 使能八路传输通道 */
   status = Gray_WriteCmd(GRAY_CMD_CH_ENABLE, 0xFF);
   if (status != HAL_OK)
   {
     return status;
   }
 
-  /* ---------- 3. 8 路归一化全部开启 ---------- */
-  /* 开启后白场输出 255、黑场输出 0，跨探头一致性更好。
-     此功能仅 V3.6 及以上固件支持，老固件写失败不影响基本使用，故不返回错误 */
+  /* 开启八路归一化；不支持该命令的旧固件仍可继续使用原始数据 */
   (void)Gray_WriteCmd(GRAY_CMD_NORMALIZE, 0xFF);
 
   return HAL_OK;

@@ -1,9 +1,9 @@
 /**
   ******************************************************************************
   * @file           : app.c
-  * @brief          : 应用层 —— 任务调度 + 循迹串级控制 + 显示
+  * @brief          : 应用层调度、车轮速度闭环与界面刷新
   ******************************************************************************
-  * 调度层次：
+  * 调度周期：
   *   按键  10ms  Key_Scan()
   *   任务  20ms  Task_Update()  按键事件 / 计时 / 里程 / 终点判定
   *   外环  20ms  Track_Update() 灰度8路 -> 加权质心 -> 转向PID -> 左右目标转速
@@ -71,9 +71,7 @@
 #define APP_RPM_R_X         126
 #define APP_RPM_VALUE_LEN   4
 
-/* 电压显示：常驻角标，不属于任何一页，翻页清屏后也要留着。
-   App_Init() 里用 Direction_V_Flip 把整屏转了 180 度，逻辑坐标原点
-   (左上角)转出来正是用户看到的物理右下角，所以就近画在逻辑 (0,0) 附近 */
+/* 电压角标在所有页面显示。屏幕翻转后，逻辑左上角对应物理右下角。 */
 #define APP_BATT_FONT       ASCII_Font16
 #define APP_BATT_FONT_W     8
 #define APP_BATT_X          4
@@ -81,22 +79,15 @@
 #define APP_BATT_VALUE_X    (APP_BATT_X + 4 * APP_BATT_FONT_W)
 #define APP_BATT_VALUE_LEN  5
 
-/* 偏差与"几路黑"共用一行，DK 用来现场标定横线阈值 */
+/* 偏差与黑色通道数共用一行，DK 用于标定横线阈值 */
 #define APP_OFF_VALUE_LEN   6
 #define APP_DK_LABEL_X      174
 #define APP_DK_VALUE_X      (APP_DK_LABEL_X + 3 * APP_FONT_W)
 #define APP_DK_VALUE_LEN    2
 
 /**
-  * 舵机工作模式。四种互斥 —— 谁都在每拍写脉宽，同时开就会互相覆盖。
-  *
-  *   OFF     压根不启动 TIM4_CH4 的 PWM。PD15 保持低电平，舵机收不到任何
-  *           脉冲，既不动作也不锁角度(失力状态)。注意这与"输出 0 度的脉冲"
-  *           完全不同：后者舵机会用力顶在 0 度上。
-  *   DEMO    在安全行程内自动往复摆动，用来验证机构行程与方向。
-  *   MANUAL  KEY3/KEY4 以 1us 步进手动微调，用来标定 SERVO_SAFE_* 与水平点。
-  *           此模式会征用 KEY3，翻页功能失效。
-  *   BALL    球杆闭环，由视觉数据驱动。
+  * 舵机工作模式，四种模式互斥。
+  * OFF：关闭 PWM；DEMO：行程自检；MANUAL：按键标定；BALL：滚球闭环。
   */
 #define APP_SERVO_OFF       0
 #define APP_SERVO_DEMO      1
@@ -107,11 +98,7 @@
 
 #define APP_SERVO_ENABLE    (APP_SERVO_MODE != APP_SERVO_OFF)
 
-/* ---------------- 分页 ----------------
-   KEY3 循环切换。切页时整屏清空重画，之后照旧只刷新数值字段。
-
-   注意：APP_SERVO_DEMO 设为 0(舵机手动标定)时，KEY3/KEY4 会被征用为脉宽
-   微调，此时无法翻页 —— 标定是临时模式，两者不会同时用。 */
+/* KEY3 循环切换页面；手动标定模式占用 KEY3/KEY4，不执行翻页。 */
 typedef enum
 {
   APP_PAGE_MAIN = 0,      /* 循迹主界面 */
@@ -120,13 +107,12 @@ typedef enum
   APP_PAGE_NUM
 } App_Page;
 
-/* 刷屏走 SPI 是毫秒级阻塞操作，摊开成每次只画一个字段才不会挤占控制节拍。
-   8 路灰度 + 偏差 + 黑路数 + 2 个转速 + 里程 (+ 舵机脉宽) */
+/* 每次只刷新一个字段，减少 SPI 阻塞对控制周期的影响。 */
 #define APP_DRAW_EVERY      2
 #if APP_SERVO_ENABLE
 #define APP_MAIN_FIELD_NUM  (GRAY_CHANNEL_NUM + 6)
 #else
-#define APP_MAIN_FIELD_NUM  (GRAY_CHANNEL_NUM + 5)   /* 少一个舵机脉宽字段 */
+#define APP_MAIN_FIELD_NUM  (GRAY_CHANNEL_NUM + 5)   /* 不显示舵机脉宽 */
 #endif
 #define APP_FIELD_OFFSET    (GRAY_CHANNEL_NUM)
 #define APP_FIELD_DARK      (GRAY_CHANNEL_NUM + 1)
@@ -136,14 +122,13 @@ typedef enum
 #define APP_FIELD_SERVO     (GRAY_CHANNEL_NUM + 5)
 
 /* ---------------- PID 页 ---------------- */
-/* 坐标常量沿用原视觉页的布局位置，改名字太费事、纯几何数值与"视觉"无关 */
+/* PID 页面沿用原视觉页面的坐标常量 */
 #define APP_VIS_Y0          52
 #define APP_VIS_DY          32
 #define APP_VIS_VALUE_X     (APP_LABEL_X + 6 * APP_FONT_W)
 #define APP_VIS_VALUE_LEN   8
 
-/* 显示当前生效的 Ball_Tune 六个增益 —— 与 vofa.c 的 O/P 指令改的是同一组数，
-   方便现场核对远程调参是否真的生效 */
+/* 显示 Ball_Tune 当前生效的六个增益，与 VOFA+ 调参数据一致。 */
 enum
 {
   APP_PID_POS_KP = 0,     /* 位置环(外环) Kp */
@@ -162,7 +147,7 @@ enum
   APP_BALL_POS,           /* 实测位置 cm */
   APP_BALL_ERR,           /* 偏差 cm */
   APP_BALL_VEL,           /* 球速 cm/s(实测) */
-  APP_BALL_VSET,          /* 位置环下达的速度指令 cm/s —— 串级调试看这个 */
+  APP_BALL_VSET,          /* 位置环输出的速度指令，cm/s */
   APP_BALL_OUT,           /* 速度环输出，相对水平点的 us 偏移 */
   APP_BALL_US,            /* 实际下发的舵机脉宽 */
   APP_BALL_STATE,         /* 是否正在闭环 */
@@ -182,7 +167,7 @@ enum
 #define APP_DIST_VALUE_X    (APP_DIST_LABEL_X + 2 * APP_FONT_W)
 #define APP_DIST_VALUE_LEN  5
 
-/* 计时单独按 100ms 刷新，不跟着字段轮转，否则秒表跳得太慢不像话 */
+/* 计时字段每 100ms 刷新一次 */
 #define APP_TIME_EVERY      10
 
 /* 显示用的一阶低通系数 */
@@ -207,8 +192,7 @@ static uint8_t  s_outer_cnt  = 0;
 static uint8_t  s_draw_cnt   = 0;
 static uint8_t  s_draw_field = 0;
 static uint8_t  s_time_cnt   = 0;
-/* 开机默认停在球杆页 —— 现在主要在调球杆闭环，开机就要看的是 SET/POS/ERR，
-   省得每次上电先按一下 KEY3 翻页 */
+/* 默认显示滚球闭环页面 */
 static App_Page s_page       = APP_PAGE_BALL;
 
 /**
@@ -325,7 +309,7 @@ static void App_DrawBallField(uint8_t field)
     {
       float err = Ball_GetTarget() - Ball_GetPosCm();
 
-      /* 1cm 就是任务五/六的评分门限，超了标红 —— 不用心算，扫一眼就知道达没达标 */
+      /* 超过任务五、六的 1cm 误差门限时标红 */
       LCD_SetColor((fabsf(err) > APP_BALL_ERR_LIMIT_CM) ? LCD_RED : LCD_GREEN);
       LCD_DisplayDecimals(APP_VIS_VALUE_X, y, err, APP_VIS_VALUE_LEN, 2);
       break;
@@ -336,9 +320,7 @@ static void App_DrawBallField(uint8_t field)
       break;
 
     case APP_BALL_VSET:
-      /* 位置环下达的速度指令 —— 串级调试时最该看的中间量。
-         VEL 迟迟追不上 VSET 就是速度环 Kp 不够；VSET 本身抖得厉害
-         就是位置环 Kd 不够或 Kp 太大 */
+      /* 显示位置环输出的速度指令 */
       LCD_SetColor(LCD_CYAN);
       LCD_DisplayDecimals(APP_VIS_VALUE_X, y, Ball_GetVelSetCmS(), APP_VIS_VALUE_LEN, 1);
       break;
@@ -366,7 +348,7 @@ static void App_DrawBallField(uint8_t field)
   */
 static void App_DrawTaskLine(void)
 {
-  /* 这几行只属于主界面；在别的页上调用会画花屏幕 */
+  /* 主界面专用字段 */
   if (s_page != APP_PAGE_MAIN)
   {
     return;
@@ -383,7 +365,7 @@ static void App_DrawTaskLine(void)
 
 static void App_DrawStateLine(void)
 {
-  /* 这几行只属于主界面；在别的页上调用会画花屏幕 */
+  /* 主界面专用字段 */
   if (s_page != APP_PAGE_MAIN)
   {
     return;
@@ -412,7 +394,7 @@ static void App_DrawStateLine(void)
 
 static void App_DrawStatus(void)
 {
-  /* 这几行只属于主界面；在别的页上调用会画花屏幕 */
+  /* 主界面专用字段 */
   if (s_page != APP_PAGE_MAIN)
   {
     return;
@@ -463,14 +445,12 @@ static void App_DrawBatteryValue(void)
 }
 
 /**
-  * @brief  计时显示，秒 + 两位小数
-  * @note   任务四/五/六到达评分点后改显示锁存的分段时间并标青色 ——
-  *         任务四是 A->B(≤8s)，任务五/六是整圈到 A(≤30s)。任务五/六
-  *         通过 A 时正式掐表，之后只继续执行不计时的平缓停车。
+  * @brief  显示任务时间，单位为秒
+  * @note   任务四在 B 点锁存时间；任务五、六在再次经过 A 点时锁存时间。
   */
 static void App_DrawTime(void)
 {
-  /* 这几行只属于主界面；在别的页上调用会画花屏幕 */
+  /* 主界面专用字段 */
   if (s_page != APP_PAGE_MAIN)
   {
     return;
@@ -495,8 +475,6 @@ static void App_DrawTime(void)
 
 /**
   * @brief  重画 PID 页的一个数值字段
-  * @note   每次都重新 Ball_GetTune() 取一份 —— 这一页刷新不快(APP_DRAW_EVERY)，
-  *         没必要为了省这一次结构体拷贝去额外维护缓存
   */
 static void App_DrawPidField(uint8_t field)
 {
@@ -563,7 +541,7 @@ static void App_DrawField(uint8_t field)
   }
   else if (field == APP_FIELD_OFFSET)
   {
-    /* 压在横线上标绿、丢线标红，一眼能看出传感器当前的处境 */
+    /* 横线标绿，丢线标红 */
     if (Track_IsCrossLine())
     {
       LCD_SetColor(LCD_GREEN);
@@ -576,12 +554,7 @@ static void App_DrawField(uint8_t field)
   }
   else if (field == APP_FIELD_DARK)
   {
-    /* 有几路探头看到黑色。
-       运行中显示实时值；停下来显示【峰值】—— 车扫过 A 点只有几拍，实时值
-       根本来不及看，而峰值是任务层在进终点窗口时清零的(见 task.c 的
-       Task_ArmFinishGate)，所以跑完一趟读到的就是"过 A 那一下最多数到几路"。
-       它没到 TASK_CROSS_MIN_CH 就是没停下来的原因，据此调 tracking.h 的
-       TRACK_CROSS_WEIGHT_TH / task.h 的 TASK_CROSS_MIN_CH */
+    /* 运行时显示黑色通道数，停止后显示终点检测窗口内的峰值。 */
     uint8_t dk = Task_IsRunning() ? Track_GetDarkCount() : Track_GetDarkPeak();
 
     LCD_SetColor(Track_IsCrossLine() ? LCD_GREEN : LCD_WHITE);
@@ -634,12 +607,7 @@ static void App_SpeedLoop(void)
 }
 
 /**
-  * @brief  任务未运行时的处理：先主动刹到零，停稳后再短路刹车驻车
-  *
-  * @note   TB6612 的短路刹车靠电机反电动势产生制动力矩，而反电动势正比于转速
-  *         —— 蠕行速度(40rpm)下反电动势很小，制动力矩弱得可怜，车会滑出一截。
-  *         所以这里先让速度环以 0 为目标继续工作，它会输出反向 PWM 把车【拽】停，
-  *         制动力矩不再依赖车速。等真正停稳了再切成短路刹车驻车、并清空积分。
+  * @brief  未运行时先由速度环减速，停稳后切换为短路刹车
   */
 static void App_Idle(void)
 {
@@ -662,7 +630,7 @@ static void App_Idle(void)
 
   if (moving)
   {
-    /* 还在滑行：速度环主动反拖 */
+    /* 车辆仍在运动，由速度环主动减速 */
     for (uint8_t i = 0; i < MOTOR_NUM; i++)
     {
       s_out[i] = PID_Update(&s_pid[i], 0.0f, s_rpm[i]);
@@ -671,7 +639,7 @@ static void App_Idle(void)
     return;
   }
 
-  /* 已经停稳：短路刹车驻车。必须清积分，否则下次启动会带着残留猛冲一下 */
+  /* 停稳后清除积分并短路刹车 */
   for (uint8_t i = 0; i < MOTOR_NUM; i++)
   {
     s_out[i] = 0.0f;
@@ -682,9 +650,7 @@ static void App_Idle(void)
 }
 
 /**
-  * @brief  整屏切换到当前页
-  * @note   页与页的静态文字位置不同，必须整屏清空重画；之后回到"每拍只刷一个
-  *         数值字段"的常规节奏，不会持续占用 SPI
+  * @brief  清屏并绘制当前页面
   */
 static void App_ShowPage(void)
 {
@@ -715,13 +681,13 @@ static void App_ShowPage(void)
 
 void App_Init(void)
 {
-  /* ---------- 蜂鸣器：开机响一声，提示上电自检开始 ---------- */
+  /* 开机提示音 */
   Buzzer_Init();
   Buzzer_Beep(BUZZER_BOOT_BEEP_MS);
 
-  /* ---------- LCD ---------- */
+  /* 显示屏 */
   SPI_LCD_Init();
-  LCD_SetDirection(Direction_V_Flip);   /* 竖屏 240x320，整屏旋转 180 度 */
+  LCD_SetDirection(Direction_V_Flip);   /* 竖屏显示，旋转 180 度 */
   LCD_SetBackColor(LCD_BLACK);
   LCD_SetColor(LCD_WHITE);
   LCD_Clear();
@@ -729,24 +695,24 @@ void App_Init(void)
 
   App_DrawStaticLayout();
 
-  /* ---------- 视觉模块 ---------- */
+  /* 视觉通信 */
   Vision_Init();
 
-  /* ---------- VOFA+ 上位机 ---------- */
+  /* VOFA+ 通信 */
   Vofa_Init();
 
-  /* ---------- 灰度传感器 ---------- */
+  /* 灰度传感器 */
   s_gray_status = Gray_Init();
   App_DrawStatus();
 
-  /* ---------- 电压检测 ---------- */
+  /* 电池电压 */
   Battery_Init();
 
-  /* ---------- 电机与编码器 ---------- */
+  /* 电机与编码器 */
   Motor_Init();
   Encoder_Init();
 
-  /* ---------- 内环：两路速度 PID ---------- */
+  /* 两路车轮速度环 */
   for (uint8_t i = 0; i < MOTOR_NUM; i++)
   {
     PID_Init(&s_pid[i], APP_PID_KP, APP_PID_KI, APP_PID_KD, APP_CTRL_DT);
@@ -754,13 +720,13 @@ void App_Init(void)
     PID_SetIntegralLimit(&s_pid[i], APP_PID_I_LIMIT);
   }
 
-  /* ---------- 外环与任务层 ---------- */
+  /* 循迹与任务层 */
   Track_Init();
   Task_Init();
 
-  /* ---------- 舵机 ---------- */
+  /* 舵机及滚球控制 */
 #if APP_SERVO_ENABLE
-  Servo_Init();                         /* 启动 PWM，回到水平点 1500us */
+  Servo_Init();                         /* 启动 PWM 并回到水平位置 */
 #if (APP_SERVO_MODE == APP_SERVO_DEMO)
   Servo_DemoInit();
 #elif (APP_SERVO_MODE == APP_SERVO_BALL)
@@ -769,8 +735,7 @@ void App_Init(void)
 #endif
 #endif
 
-  /* 所有模块都初始化完了，整屏重画一次当前页 —— 与 KEY3 翻页走同一条路径，
-     免得两处各画各的、以后加字段时漏掉一边 */
+  /* 初始化完成后绘制当前页面 */
   App_ShowPage();
   s_shown_task  = Task_GetId();
   s_shown_state = Task_GetState();
@@ -790,13 +755,13 @@ void App_Run(void)
   }
   s_last_tick = now;
 
-  /* ---------- 按键：每拍扫描 ---------- */
+  /* 按键扫描 */
   Key_Scan();
 
-  /* ---------- 视觉：解析中断收进来的字节 ---------- */
+  /* 解析视觉数据 */
   Vision_Update();
 
-  /* ---------- VOFA+：解析上位机指令 + 周期发一帧画图数据 ---------- */
+  /* 处理 VOFA+ 指令并发送遥测数据 */
   Vofa_Update();
 
 #if (APP_SERVO_MODE == APP_SERVO_MANUAL)
@@ -811,18 +776,9 @@ void App_Run(void)
 #endif
 
 #if (APP_SERVO_MODE == APP_SERVO_DEMO)
-  Servo_DemoUpdate();                   /* 在 1050~2400us 之间往复摆动 */
+  Servo_DemoUpdate();                   /* 在安全行程内往复摆动 */
 #elif (APP_SERVO_MODE == APP_SERVO_BALL)
-  /* 视觉端新增的 target_cm 只在【没有任务在运行】且【本帧确实带了这个字段】
-     时才采用 —— 任务运行中的目标由 task.c 的状态机(如任务三的 -5cm 保持)
-     或 vofa.c 的 T 指令管理，每帧都用视觉值覆盖会把它们的目标切换打断；
-     视觉端没发目标的帧(has_target==0)自然也不该拿 0 去瞎设。
-     断链(Vision_IsFresh()==0)时同样不采用，避免拿着陈旧值瞎跑。
-
-     任务三【已完成】的状态要额外排除：它跑完之后计时虽然停了，但闭环还在
-     按着球稳定在 -5cm(规则要求"稳定在该点附近"，见 task.h)，这时候被视觉
-     的目标一覆盖，球就被拽走了，等于把刚拿到的分数丢掉。中途叫停(IDLE)
-     不在此列 —— 那种情况球已经被归位到中心，让视觉接管没问题 */
+  /* 空闲时允许视觉帧更新目标。任务三完成后继续保持任务设定值。 */
   if (!Task_IsRunning() && Vision_IsFresh() &&
       !((Task_GetId() == TASK_3) && (Task_GetState() == TASK_STATE_DONE)))
   {
@@ -833,12 +789,9 @@ void App_Run(void)
       Ball_SetTarget(vb->target_cm);
     }
   }
-  Ball_Update();                        /* 球杆闭环，内部只在新帧到达时动作 */
+  Ball_Update();                        /* 有新视觉帧时更新滚球闭环 */
 #elif (APP_SERVO_MODE == APP_SERVO_MANUAL)
-  /* KEY3/KEY4：舵机以最小步进(1us)增减脉宽，用来标定机构行程。
-     用 Key_WasRepeated() 而不是 Key_WasPressed()：按住会连发，
-     否则 1us 一步走完整个行程要按上千下。
-     KEY1/KEY2 由 Task_Update() 用 Key_WasPressed() 消费，两套事件位互不影响 */
+  /* 手动模式下，KEY3/KEY4 以最小步进连续调整舵机脉宽。 */
   if (Key_WasRepeated(KEY3))
   {
     Servo_StepUs(+SERVO_STEP_US);
@@ -849,21 +802,17 @@ void App_Run(void)
   }
 #endif
 
-  /* ---------- 任务层 + 循迹外环：每 2 拍 ---------- */
+  /* 任务层与循迹外环 */
   s_outer_cnt++;
   if (s_outer_cnt >= APP_OUTER_EVERY)
   {
     s_outer_cnt = 0;
 
-    /* 任务自己开车的情况(隐藏的倒车任务)优先：轮速由 Task_GetDriveTargets()
-       直接给出，循迹外环整个让位 —— 倒着走时车头的灰度阵列变成拖在后面的
-       探头，循迹环在这个几何下是正反馈，会越修越歪(详见 task.h 任务七参数区)。
-       顺带也就不依赖灰度了，I2C 挂了照样能把车倒出来 */
+    /* 任务提供轮速目标时跳过循迹外环。 */
     if (Task_IsRunning() &&
         !Task_GetDriveTargets(&s_target[MOTOR_LEFT], &s_target[MOTOR_RIGHT]))
     {
-      /* 灰度没通就不许跑，否则会拿着全 0 的数据一头冲出去。
-         静止任务(如任务三)也不能跑外环 —— 否则车会自己沿线开走 */
+      /* 只有车辆任务且灰度通信正常时才运行循迹外环。 */
       if (Task_UsesVehicle() && (s_gray_status == HAL_OK))
       {
         HAL_StatusTypeDef status;
@@ -880,17 +829,17 @@ void App_Run(void)
       }
       else
       {
-        /* 静止任务：目标转速钉死为 0，速度环会主动把轮子按住不动 */
+        /* 静止任务保持车轮目标转速为零 */
         s_target[MOTOR_LEFT]  = 0.0f;
         s_target[MOTOR_RIGHT] = 0.0f;
       }
     }
 
-    /* Task_Update 放在 Track_Update 之后，这样终点判定用的是本拍的新数据 */
+    /* 任务状态机使用本周期更新后的循迹数据 */
     Task_Update();
   }
 
-  /* ---------- 内环：每拍 ---------- */
+  /* 车轮速度内环 */
   if (Task_IsRunning())
   {
     App_SpeedLoop();
@@ -900,7 +849,7 @@ void App_Run(void)
     App_Idle();
   }
 
-  /* ---------- 显示 ---------- */
+  /* 显示刷新 */
   if (Task_GetId() != s_shown_task)
   {
     s_shown_task = Task_GetId();

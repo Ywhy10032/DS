@@ -3,12 +3,7 @@
   * @file           : vision.c
   * @brief          : 视觉模块串口接收与解析 (UART4)
   ******************************************************************************
-  * @note  UART4 与 PA0/PA1 的复用由 CubeMX 生成的 MX_UART4_Init() 完成，
-  *        因此 Vision_Init() 必须在它之后调用。
-  *
-  *        接收走中断而不是轮询：115200 下 10ms 就能来 115 字节，而 F407 的
-  *        UART 只有一个数据寄存器、没有 FIFO，主循环 10ms 才看一次的话
-  *        绝大部分字节都会被覆盖丢掉。
+  * @note  使用单字节中断接收和环形缓冲区，解析工作在主循环中完成。
   ******************************************************************************
   */
 
@@ -25,7 +20,7 @@
 static volatile uint8_t  s_ring[VISION_RX_RING_SIZE];
 static volatile uint16_t s_head = 0;        /* 中断写 */
 static volatile uint16_t s_tail = 0;        /* 主循环读 */
-static uint8_t           s_rx_byte = 0;     /* HAL 单字节接收的落点 */
+static uint8_t           s_rx_byte = 0;     /* HAL 单字节接收缓冲 */
 
 /* ---------------- 解析侧 ---------------- */
 static char     s_line[VISION_LINE_MAX];
@@ -47,11 +42,7 @@ void UART4_IRQHandler(void)
 #endif
 
 /**
-  * @brief  UART4 接收完成回调
-  * @note   不再直接叫 HAL_UART_RxCpltCallback —— 这个名字全工程只能有一份
-  *         定义，USART1 那路(vofa.c)也要用。真正的 HAL 回调集中放在
-  *         usart.c 里按 huart->Instance 分发给各自模块，见该文件 USER CODE
-  *         BEGIN 1 段。
+  * @brief  UART4 接收完成处理，由 usart.c 的 HAL 回调分发
   */
 void Vision_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
@@ -80,8 +71,7 @@ void Vision_UART_ErrorCallback(UART_HandleTypeDef *huart)
     return;
   }
 
-  /* 溢出/帧错误会让 HAL 把接收状态置回 READY 并停止接收 —— 不重新挂上的话
-     通信会就此永久中断。这类错误在对端复位、波特率不匹配时很常见 */
+  /* 清除串口错误并重新启动接收 */
   __HAL_UART_CLEAR_OREFLAG(huart);
   s_error_count++;
 
@@ -139,15 +129,13 @@ static uint8_t Vision_ParseLine(const char *line)
   b.frame_time_ms = (uint32_t)strtoul(p, &end, 10);
   if (end == p) { return 0; }
 
-  /* target_cm 是可选字段：视觉端不想指定目标时可以整个省掉，老格式(不带
-     这个字段)的帧必须仍然能正常解出前面这些数据 —— 不能因为少一个字段就
-     把 valid/x_cm/confidence 这些好端端的信息也一起丢掉 */
+  /* target_cm 为可选字段，缺省时仍保留前面字段的解析结果 */
   p = Vision_NextField(end);
   if (p != NULL)
   {
     float target = strtof(p, &end);
 
-    if (end == p) { return 0; }   /* 有逗号却没跟合法数字，仍算格式错误 */
+    if (end == p) { return 0; }   /* 字段存在但不是有效数字 */
     b.target_cm  = target;
     b.has_target = 1;
   }
@@ -157,7 +145,7 @@ static uint8_t Vision_ParseLine(const char *line)
     b.has_target = 0;
   }
 
-  /* 整帧都解出来了才提交，避免半截数据污染上一帧的有效值 */
+  /* 完整解析后再提交结果 */
   s_ball      = b;
   s_last_tick = HAL_GetTick();
   s_frame_count++;
@@ -179,7 +167,7 @@ void Vision_Init(void)
   memset(&s_ball, 0, sizeof(s_ball));
 
 #if VISION_OWN_IRQ_HANDLER
-  /* 优先级设在 SysTick(15) 之上：串口中断很短，抢占它不影响任何时基 */
+  /* UART4 中断优先级高于 SysTick */
   HAL_NVIC_SetPriority(UART4_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(UART4_IRQn);
 #endif
@@ -194,7 +182,7 @@ void Vision_Update(void)
     char c = (char)s_ring[s_tail];
     s_tail = (uint16_t)((s_tail + 1U) & VISION_RING_MASK);
 
-    /* 帧头随时可以重新同步：中间丢字节也不会让解析器一直错下去 */
+    /* 收到帧头时重新同步 */
     if (c == '$')
     {
       s_line_len = 0;
@@ -208,7 +196,7 @@ void Vision_Update(void)
       continue;
     }
 
-    if (c == '*')               /* 帧尾。'\n' 留给下一帧的 '$' 去重新同步 */
+    if (c == '*')               /* 帧尾 */
     {
       s_line[s_line_len] = '\0';
       if (!Vision_ParseLine(s_line))
@@ -225,7 +213,7 @@ void Vision_Update(void)
     }
     else
     {
-      s_in_frame = 0;           /* 超长，整帧丢弃等下一个 '$' */
+      s_in_frame = 0;           /* 丢弃超长帧 */
       s_error_count++;
     }
   }
@@ -240,7 +228,7 @@ uint32_t Vision_GetAgeMs(void)
 {
   if (s_frame_count == 0U)
   {
-    return VISION_TIMEOUT_MS;   /* 一帧都没收到，直接当作超时 */
+    return VISION_TIMEOUT_MS;   /* 尚未收到有效帧，按超时处理 */
   }
   return HAL_GetTick() - s_last_tick;
 }

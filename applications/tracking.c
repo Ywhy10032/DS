@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file           : tracking.c
-  * @brief          : 循迹外环 —— 加权质心求偏差，转向 PID 输出左右差速
+  * @brief          : 八路灰度循迹外环
   ******************************************************************************
   */
 
@@ -22,15 +22,15 @@ static float    s_offset      = 0.0f;      /* 最近一次的有效偏差 */
 static uint8_t  s_lost        = 0;
 static uint16_t s_lost_ticks  = 0;
 static uint8_t  s_dark_count  = 0;         /* 有多少路探头看到黑色 */
-static uint8_t  s_dark_left   = 0;         /* 其中车体中线【左边】有几路 */
-static uint8_t  s_dark_right  = 0;         /* 中线【右边】有几路 */
+static uint8_t  s_dark_left   = 0;         /* 车体中线左侧黑色通道数 */
+static uint8_t  s_dark_right  = 0;         /* 车体中线右侧黑色通道数 */
 static float    s_line_weight = 0.0f;      /* 八路权重总和(总黑度) */
 
-/* 横线判据的当前门槛。默认是严判据，终点窗口里由任务层放宽 */
+/* 当前横线门限；进入终点窗口后可由任务层调整。 */
 static uint8_t  s_cross_min_ch   = TRACK_CROSS_MIN_CH;
 static float    s_cross_max_off  = TRACK_CROSS_MAX_OFFSET_MM;
 
-/* 峰值保持。车过 A 点只有几拍，实时值根本看不清，靠这两个数事后复盘 */
+/* 终点窗口内的通道数和总黑度峰值。 */
 static uint8_t  s_dark_peak   = 0;
 static float    s_weight_peak = 0.0f;
 
@@ -45,10 +45,7 @@ static HAL_StatusTypeDef s_status = HAL_ERROR;  /* 最近一次灰度读取的�
   * @param  offset 算出的偏差(mm)，仅在返回 1 时有效
   * @retval 1 = 成功；0 = 丢线(权重总和过小)
   *
-  * @note   归一化后白场 255、黑场 0。白底黑线时权重取 255-读数，读数越黑
-  *         权重越大；黑底白线则反过来直接用读数。
-  *         低于噪声阈值的通道整个清零 —— 白场读数不会正好是极值，不掐掉
-  *         的话八路的零星波动会把质心往中间拽偏。
+  * @note   白底黑线时使用 255-读数作为权重；低于噪声门限的权重清零。
   */
 static uint8_t Track_Centroid(const uint8_t *values, float *offset)
 {
@@ -68,7 +65,7 @@ static uint8_t Track_Centroid(const uint8_t *values, float *offset)
 
     if (weight >= TRACK_CROSS_WEIGHT_TH)
     {
-      /* 顺手统计有多少路是黑的、分布在中线哪一侧，两个都用于横线判定 */
+      /* 统计黑色通道数量及其在车体中线两侧的分布。 */
       dark_count++;
 
       if (s_position_mm[i] < 0.0f)
@@ -95,7 +92,7 @@ static uint8_t Track_Centroid(const uint8_t *values, float *offset)
   s_dark_right  = dark_right;
   s_line_weight = sum_weight;
 
-  /* 峰值保持：横线只被扫过几拍，实时值肉眼看不住，留下最大值供事后复盘 */
+  /* 保留终点检测所需的短时峰值。 */
   if (dark_count > s_dark_peak)
   {
     s_dark_peak = dark_count;
@@ -129,8 +126,7 @@ void Track_Init(void)
   s_target[0]  = 0.0f;
   s_target[1]  = 0.0f;
 
-  /* 横线判据恢复默认的严门槛。放宽是任务层在终点窗口里临时干的事，
-     每次启动都必须先收回来，否则上一趟放宽的门槛会带到下一趟的全程 */
+  /* 每次初始化恢复默认横线门限。 */
   s_cross_min_ch  = TRACK_CROSS_MIN_CH;
   s_cross_max_off = TRACK_CROSS_MAX_OFFSET_MM;
 
@@ -159,7 +155,7 @@ void Track_Update(void)
   float   floor_rpm;
 
   /* ---------- 1. 读灰度 ---------- */
-  /* I2C 偶发失败时沿用上一次的偏差，不让通讯抖动传进控制环 */
+  /* I2C 读取失败时保留上一拍控制状态。 */
   s_status = Gray_ReadAll(values);
   if (s_status == HAL_OK)
   {
@@ -171,17 +167,14 @@ void Track_Update(void)
     /* ---------- 2. 加权质心 ---------- */
     if (Track_Centroid(values, &offset))
     {
-      /* 一阶低通，磨掉宽线造成的死区跳变(见 tracking.h 里 TRACK_OFFSET_LPF 的说明) */
+      /* 对质心偏差进行一阶低通。 */
       s_offset    += TRACK_OFFSET_LPF * (offset - s_offset);
       s_lost       = 0;
       s_lost_ticks = 0;
     }
     else
     {
-      /* 丢线 = 线已经跑出探头阵列。把偏差钉到阵列边缘之外、方向沿用丢线前，
-         让转向环直接给出最大修正。
-         注意不能只是"保持上一次的偏差"：线是从边缘滑出去的，滑出瞬间那个
-         偏差往往还不到满量程，照着它修正力度远远不够，车会几乎直着冲出弯道 */
+      /* 丢线后沿原偏差方向使用阵列外侧虚拟位置，以输出最大修正。 */
       s_lost = 1;
       s_offset = (s_offset >= 0.0f) ? TRACK_LOST_OFFSET_MM : -TRACK_LOST_OFFSET_MM;
 
@@ -201,18 +194,14 @@ void Track_Update(void)
   }
 
   /* ---------- 4. 转向 PID ---------- */
-  /* 目标偏差恒为 0(线压在车体中线上)。offset > 0 表示线在右侧，
-     PID 输出为负，于是左轮 base-steer 变快、右轮 base+steer 变慢，
-     车头向右修正 —— 正好把线拉回中间 */
+  /* 目标偏差为 0；正偏差表示黑线位于车体右侧。 */
   steer = PID_Update(&s_steer_pid, 0.0f, s_offset);
 
   /* ---------- 5. 弯道减速 ---------- */
-  /* 偏差越大弯越急，按比例压低基准速度。转向力度有物理上限，速度高到一定
-     程度就只能靠减速来换转向半径 —— 这是高速循迹能过弯的关键 */
+  /* 按偏差幅值降低基准转速。 */
   base = s_base_rpm - s_curve_slow * fabsf(s_offset);
 
-  /* 减速下限。注意要跟着 s_base_rpm 走：外部把基准设成 0(停车)时，
-     下限也必须是 0，否则这里反而会把车重新推起来 */
+  /* 基准速度为 0 时减速下限也必须为 0。 */
   floor_rpm = (s_base_rpm < TRACK_MIN_RPM) ? s_base_rpm : TRACK_MIN_RPM;
   if (base < floor_rpm)
   {
@@ -249,35 +238,22 @@ uint8_t Track_IsCrossLine(void)
 {
   uint8_t hit;
 
-  /* ---------- 一票否决：黑簇必须【跨过车体中线】 ----------
-     这是把 A 点横线和弯道斜穿区分开的关键，而且是几何上必然成立的：
-     横线骑在纵线上，车又在跟着纵线走，所以它盖住的那一片必然横跨中线；
-     而弯道里线是甩到一侧去的，黑簇整片偏在左边或右边。
-
-     实测(停车瞬间那一拍的原始数据，权重 = 255-读数，门限 120)：
-       A 点横线    ch1/ch2/ch3 在左 + ch4 在右   -> 跨中线  ✓
-       弯道误判 1  ch5/ch6/ch7 全在右侧          -> 不跨    ✗
-       弯道误判 2  ch4/ch5/ch6 全在右侧          -> 不跨    ✗
-     光看"几路黑"是分不开的(弯道也能凑到 3 路)，看"在哪一侧"一分就开。 */
+  /* 横线的黑色通道必须同时分布在车体中线两侧。 */
   if ((s_dark_left == 0U) || (s_dark_right == 0U))
   {
     return 0;
   }
 
-  /* 再卡姿态：压在横线上时质心不会太远，而急弯里线明显偏向一侧 */
+  /* 使用偏差门限排除姿态偏斜过大的情况。 */
   if (fabsf(s_offset) > s_cross_max_off)
   {
     return 0;
   }
 
-  /* 判据一：够多路同时黑。姿态正的时候最干净 */
+  /* 判据一：黑色通道数达到门限。 */
   hit = (s_dark_count >= s_cross_min_ch);
 
-  /* 判据二：总黑度够大。车带着横摆角压上横线时，各路是先后进入胶带的，
-     同一拍里数不满路数，但"半黑"的探头仍然按比例贡献权重，总和照样上得去
-     —— 这条是给出弯口那种歪着过 A 的姿态兜底的(见 tracking.h 的说明) */
-  /* 阈值填 0 就是关掉这条判据。写成运行时判断而不是 #if —— 预处理器不认
-     浮点比较，编译器自己会把这个常量条件折叠掉，不占运行开销 */
+  /* 判据二：总黑度达到门限。门限为 0 时关闭该判据。 */
   if ((TRACK_CROSS_SUM_TH > 0.0f) && (s_line_weight >= TRACK_CROSS_SUM_TH))
   {
     hit = 1;
@@ -304,10 +280,7 @@ void Track_SetCrossGate(uint8_t min_ch, float max_offset_mm)
 
 void Track_ResetCrossPeak(void)
 {
-  /* 用【本拍的实测值】做起点而不是清 0：任务层是在进终点窗口那一拍调用本
-     函数的，而那一拍的灰度数据在此之前就已经算完了(app.c 里 Track_Update()
-     排在 Task_Update() 前面)。清 0 的话，万一就在这一拍判到终点停了车，
-     屏幕上的峰值会显示成 0，反而看不到当时到底是什么数据触发的 */
+  /* 以当前测量值作为峰值起点，保留进入窗口当拍的数据。 */
   s_dark_peak   = s_dark_count;
   s_weight_peak = s_line_weight;
 }
@@ -360,25 +333,3 @@ void Track_Stop(void)
   s_target[1] = 0.0f;
   PID_Reset(&s_steer_pid);
 }
-
-/**
-  ******************************************************************************
-  * 转向 PID 整定
-  *
-  *   Kp  车压线上时把它拉回中线的力度。
-  *       太小 -> 过弯跟不上，冲出赛道
-  *       太大 -> 直道上左右画蛇(S 形摆动)
-  *       先 Ki=Kd=0，只调 Kp 到"直道基本走直、弯道能跟上"为止。
-  *
-  *   Kd  抑制画蛇的阻尼，靠偏差的变化率提前反打方向。
-  *       Kp 调好后如果还有轻微摆动，加一点 Kd 会明显改善。
-  *       太大会对灰度噪声过敏，表现为高频抖动。
-  *
-  *   Ki  循迹环一般保持 0。转向没有"稳态误差"需要消除，加了反而会在
-  *       连续弯道后残留积分，让车拐过头。除非车有明显的机械偏心
-  *       (松手直行会往一边偏)，才给一点点 Ki。
-  *
-  *   基准速度和 Kp 是耦合的：TRACK_BASE_RPM 提高后，同样的 Kp 会显得偏软，
-  *   通常需要同步加大。建议先在低速(40~60rpm)把形状调对，再逐步提速。
-  ******************************************************************************
-  */

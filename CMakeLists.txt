@@ -82,7 +82,7 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
 )
 
-# newlib-nano 默认不带浮点 printf，LCD_DisplayDecimals() 依赖它显示小数
+# 启用 newlib-nano 的浮点格式化支持，供显示和遥测使用
 target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -u _printf_float)
 
 # Remove wrong libob.a library dependency when using cpp files

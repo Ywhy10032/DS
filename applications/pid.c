@@ -19,7 +19,7 @@ void PID_Init(PID_Controller *pid, float kp, float ki, float kd, float dt)
   pid->out_min           = -1000.0f;
   pid->out_max           =  1000.0f;
   pid->integral_limit    =  1000.0f;
-  pid->integral_deadband =     0.0f;   /* 默认关闭，不改变现有行为 */
+  pid->integral_deadband =     0.0f;   /* 默认关闭 */
 
   PID_Reset(pid);
 }
@@ -58,10 +58,10 @@ void PID_PresetIntegral(PID_Controller *pid, float term)
 {
   if (pid->ki <= 1e-6f)
   {
-    return;                    /* 积分项恒为 0，没有可预置的量 */
+    return;                    /* Ki 为零时积分项无输出 */
   }
 
-  /* 限幅口径与 PID_Update() 保持一致：限的是积分【项】而不是裸积分量 */
+  /* 对积分项输出限幅，与 PID_Update() 的口径一致 */
   if (term > pid->integral_limit)
   {
     term = pid->integral_limit;
@@ -82,23 +82,20 @@ float PID_Update(PID_Controller *pid, float setpoint, float measurement)
   float d_term = 0.0f;
   float out;
 
-  /* ---------- 比例 ---------- */
+  /* 比例项 */
   p_term = pid->kp * error;
 
-  /* ---------- 积分（带抗饱和限幅 + 死区） ---------- */
+  /* 积分项，带死区和抗饱和限幅 */
   if (pid->ki > 1e-6f)
   {
-    /* 死区内不累加：噪声量级的误差不该继续推动积分乱走，否则会在死区
-       非线性(如静摩擦)附近产生缓慢的"充电-越界-冲过头-回落"极限环。
-       积分就停在原值上，不清零——它可能正憋着顶住恒定阻力所需的量，
-       清零反而会立刻丢掉这份补偿 */
+    /* 死区内冻结积分，保留已有的稳态补偿 */
     if (fabsf(error) >= pid->integral_deadband)
     {
       float integral_max;
 
       pid->integral += error * pid->dt;
 
-      /* 限幅是对积分【项】(ki*integral)做的，这样改 Ki 时限幅含义不变 */
+      /* 对 ki*integral 限幅，使限幅含义不随 Ki 改变 */
       integral_max = pid->integral_limit / pid->ki;
       if (pid->integral > integral_max)
       {
@@ -112,14 +109,14 @@ float PID_Update(PID_Controller *pid, float setpoint, float measurement)
   }
   else
   {
-    pid->integral = 0.0f;      /* Ki 关掉时不要留着旧的积分量 */
+    pid->integral = 0.0f;      /* Ki 关闭时清除积分 */
   }
   i_term = pid->ki * pid->integral;
 
-  /* ---------- 微分（作用于测量值，故取负号） ---------- */
+  /* 微分项作用于测量值 */
   if (pid->first_run)
   {
-    pid->first_run = 0;        /* 第一拍没有历史值，微分记 0 */
+    pid->first_run = 0;        /* 首次更新没有历史测量值 */
   }
   else
   {
@@ -127,7 +124,7 @@ float PID_Update(PID_Controller *pid, float setpoint, float measurement)
   }
   pid->prev_measurement = measurement;
 
-  /* ---------- 求和与输出限幅 ---------- */
+  /* 求和并执行输出限幅 */
   out = p_term + i_term + d_term;
 
   if (out > pid->out_max)

@@ -1,20 +1,10 @@
 /**
   ******************************************************************************
   * @file           : ball.c
-  * @brief          : 球杆闭环 —— 串级：位置环 -> 速度环 -> 舵机倾角
+  * @brief          : 钢球位置与速度串级控制
   ******************************************************************************
-  * @note  结构与整定顺序见 ball.h 顶部。这里只强调实现上的三个要点：
-  *
-  *        1. 两级都只在【收到新视觉帧】时推进。视觉是唯一的反馈来源，
-  *           两帧之间位置没有新信息，照常跑一遍只会让微分项在"没变"的拍上
-  *           读到 0、在"变了"的拍上读到尖峰，等于给控制器喂噪声。
-  *
-  *        2. 速度环的【积分】是这一版的核心。摩擦、管子下垂、水平点残差
-  *           这些恒定阻力全部由它自动累积补偿 —— 上一版那套摩擦前馈、
-  *           静摩擦补偿状态机、下垂前馈、瞄准偏置因此全部删除。
-  *
-  *        3. 位置环的微分【不用】PID 内部的差分，而是直接用本文件里滤波过的
-  *           速度估计。理由见 Ball_Update() 里的注释。
+  * @note  控制器只在新视觉帧到达时更新。速度环积分补偿恒定阻力；位置环
+  *        微分直接使用低通后的球速估计。
   ******************************************************************************
   */
 
@@ -32,7 +22,7 @@
 static PID_Controller s_pos_pid;
 static PID_Controller s_vel_pid;
 
-/* 当前生效的参数组，任务层用 Ball_SetTune() 切换 */
+/* 当前生效的参数组，可由任务层切换。 */
 static Ball_Tune s_tune = BALL_TUNE_DEFAULT_INIT;
 
 static float    s_target_cm  = BALL_TARGET_CM;
@@ -44,10 +34,7 @@ static float    s_output_us  = 0.0f;    /* 速度环输出(相对水平点) */
 static float    s_accel_ff   = 0.0f;    /* 小车当前加速度(rpm/秒)，任务层告知 */
 static float    s_curve_ff   = 0.0f;    /* v_avg x 轮速差，用于过弯前馈 */
 
-/* 加速度前馈的增益。是【机构标定常数】而不是任务参数，所以不在 Ball_Tune
-   里，也就不会被 Ball_ResetTune()/Task_Start() 冲掉 —— 起步发生在按下 KEY2
-   之后的头一秒，放进 Ball_Tune 的话运行前标的值根本活不到那个时候。
-   标定方法见 ball.h 的 BALL_FF_US_PER_RPMS */
+/* 纵向加速度前馈增益是机构参数，不随任务参数组重置。 */
 static float    s_ff_gain    = BALL_FF_US_PER_RPMS;
 
 static uint32_t s_last_frames  = 0;     /* 上次处理到第几帧 */
@@ -59,8 +46,7 @@ static float    s_prev_pos_cm  = 0.0f;
 
 /**
   * @brief  把两级 PID 的限幅写进控制器
-  * @note   增益每帧都会重设，但限幅存在 PID 内部，改参数组时必须同步。
-  *         位置环的输出就是速度指令，所以它的输出限幅 = vel_limit_cms。
+  * @note   参数组变化后需要同步更新两个 PID 实例中的限幅。
   */
 static void Ball_ApplyLimits(void)
 {
@@ -74,10 +60,7 @@ static void Ball_ApplyLimits(void)
 
 /**
   * @brief  杆放平，并清掉两级控制器的历史
-  * @note   视觉断链时【必须】回平，不能保持上一次的输出 —— 斜着的杆会让球
-  *         一直加速，几百毫秒就冲出去了。放平至少让它匀速滑行。
-  *         两级的积分都要清：速度环的积分可能正憋着几百 us 去顶摩擦，
-  *         留着它等于断链后还按住油门。
+  * @note   视觉断链或闭环关闭时，摆杆回到水平位置并清除控制器历史。
   */
 static void Ball_GoLevel(void)
 {
@@ -95,7 +78,7 @@ static void Ball_GoLevel(void)
 
 void Ball_Init(void)
 {
-  /* dt 每帧都会按实际帧间隔更新，这里给的初值只是占位 */
+  /* dt 在有效视觉帧到达时按实际帧间隔更新。 */
   PID_Init(&s_pos_pid, s_tune.pos_kp, s_tune.pos_ki, 0.0f, BALL_DT_MAX_S);
   PID_Init(&s_vel_pid, s_tune.vel_kp, s_tune.vel_ki, s_tune.vel_kd, BALL_DT_MAX_S);
 
@@ -111,11 +94,7 @@ void Ball_Init(void)
 }
 
 /**
-  * @note   位置/速度估计不受 s_enabled 影响，闭环关掉时(比如任务三改成
-  *         开环定时定角度运行期间)仍然照常更新——vofa 画图、离线标定都
-  *         要靠这份实时位置，不能因为没开闭环就停更新。只有下面 PID 解算
-  *         和写舵机脉宽这一段才真正受 s_enabled 门控，避免和外部直接调用
-  *         Servo_SetPulseUs() 的代码(如任务三开环)互相抢舵机。
+  * @note   位置和速度估计始终更新；仅 PID 解算及舵机输出受使能状态控制。
   */
 void Ball_Update(void)
 {
@@ -133,7 +112,7 @@ void Ball_Update(void)
     {
       float dt = (float)(now - s_last_good_ms) / 1000.0f;
 
-      /* 视觉端卡顿或刚上电时 dt 会异常，不夹住微分项会算出天文数字 */
+      /* 限制异常帧间隔，避免速度估计突变 */
       if (dt < BALL_DT_MIN_S)
       {
         dt = BALL_DT_MIN_S;
@@ -146,10 +125,7 @@ void Ball_Update(void)
       s_pos_cm       = b->x_cm;
       s_last_good_ms = now;
 
-      /* ---------- 速度估计 ---------- */
-      /* 自己按 x_cm 差分，不用视觉发来的 vx_pixel_s —— 后者由 alpha-beta
-         滤波器的 beta 支路给出，而 beta 在球接近静止时降到 0.01，
-         时间常数长达约 1.7 秒，完全没法喂给速度环。详见 ball.h */
+      /* 使用位置差分估算球速，不采用视觉端上传的像素速度。 */
       if (s_have_prev)
       {
         float raw_vel = (s_pos_cm - s_prev_pos_cm) / dt;
@@ -168,20 +144,13 @@ void Ball_Update(void)
       {
         float out;
 
-        /* ---------- 外环：位置误差 -> 速度指令 ---------- */
-        /* Kd 传 0，微分项在下面手工加 —— PID 内部是对测量值做原始差分，
-           而位置的原始差分正是噪声最大的那个量；我们手上已经有滤波过的
-           速度估计 s_vel_cm_s，直接用它做微分项，信号质量好得多。
-           位置环微分 = -Kd x d(位置)/dt，而 d(位置)/dt 就是球速，
-           所以这一项就是 -pos_kd * s_vel_cm_s。 */
+        /* 外环微分项使用滤波球速，避免再次对原始位置做差分。 */
         PID_SetTunings(&s_pos_pid, s_tune.pos_kp, s_tune.pos_ki, 0.0f);
         s_pos_pid.dt = dt;
         s_vel_set = PID_Update(&s_pos_pid, s_target_cm, s_pos_cm)
                     - (s_tune.pos_kd * s_vel_cm_s);
 
-        /* 手工加完微分要重新限幅：PID_Update() 内部那次限幅管不到这一项。
-           这个限幅同时是串级的带宽闸门 —— 外环不许要求内环做到它做不到的
-           速度，见 ball.h 的 BALL_VEL_LIMIT_CMS */
+        /* 手工加入微分项后重新执行目标球速限幅。 */
         if (s_vel_set > s_tune.vel_limit_cms)
         {
           s_vel_set = s_tune.vel_limit_cms;
@@ -191,13 +160,7 @@ void Ball_Update(void)
           s_vel_set = -s_tune.vel_limit_cms;
         }
 
-        /* ---------- 刹车限速：按【剩余距离】压住速度指令 ---------- */
-        /* v_cap = sqrt(2 x a x 剩余距离)，即"以恒定减速度 a 刹车、正好在
-           目标处降到 0"所允许的最大速度。指令速度不超过这条曲线，物理上就
-           不存在"冲到目标附近才发现刹不住"的情况 —— 这是提前减速的正解，
-           比事后靠加大 Kd 去压过冲可靠得多(那条路在这个环路延迟下越压越振，
-           见 task.h 里记的教训)。
-           pos_brake_cms2 <= 0 视为关闭这条限速，见 ball.h */
+        /* 按 v_cap = sqrt(2 * a * 剩余距离) 限制接近目标时的球速。 */
         if (s_tune.pos_brake_cms2 > 0.0f)
         {
           float dist  = fabsf(s_target_cm - s_pos_cm);
@@ -213,20 +176,16 @@ void Ball_Update(void)
           }
         }
 
-        /* ---------- 内环：速度误差 -> 舵机倾角 ---------- */
-        /* 这一级的积分项承担了上一版整套外挂补偿的职责：摩擦、管子下垂、
-           水平点残差造成的恒定阻力，全部由它自动累积出对应的常驻倾角 */
+        /* 速度环积分用于补偿摩擦、摆杆坡度和水平点误差。 */
         PID_SetTunings(&s_vel_pid, s_tune.vel_kp, s_tune.vel_ki, s_tune.vel_kd);
         s_vel_pid.dt = dt;
         s_output_us = PID_Update(&s_vel_pid, s_vel_set, s_vel_cm_s);
 
-        /* ---------- 小车运动的前馈 ---------- */
+        /* 叠加车辆运动前馈。 */
         out = s_output_us;
 
 #if BALL_FF_ENABLE
-        /* 车往前加速时球相对摆杆向【后】滑(x 增大)，所以要往 x 减小的方向
-           预先倾杆，符号取负。前馈不进 s_output_us —— 那个值留给显示，
-           代表反馈控制器自己的意图 */
+        /* 正向加速时使用负向补偿；s_output_us 只保留反馈控制器输出。 */
         out -= s_ff_gain * s_accel_ff;
 #endif
 #if BALL_FF_CURVE_ENABLE
@@ -240,9 +199,7 @@ void Ball_Update(void)
     }
   }
 
-  /* ---------- 掉帧保护 ---------- */
-  /* 只在闭环使能时才管舵机——没使能时舵机本来就不归这里管(比如任务三的
-     开环状态机在自己写)，掉帧了也不该由这里把它拽回水平点 */
+  /* 闭环使能期间超过超时阈值未收到有效帧，摆杆回平。 */
   if (s_enabled && ((now - s_last_good_ms) > BALL_TIMEOUT_MS))
   {
     Ball_GoLevel();
@@ -276,7 +233,7 @@ void Ball_Enable(uint8_t on)
 {
   if (on && !s_enabled)
   {
-    /* 重新使能时把历史清干净，否则会带着上一轮的积分猛推一下 */
+    /* 重新使能时清除上一轮控制历史。 */
     s_last_frames  = Vision_GetFrameCount();
     s_last_good_ms = HAL_GetTick();
     Ball_GoLevel();
