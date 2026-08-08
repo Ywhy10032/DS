@@ -36,8 +36,8 @@
   *        "发几就是任务几"用的是同一套编号，ch8 显示几就发 N 几能切回来。
   *        7 是隐藏的倒车任务，短按 KEY1 循环切不到它，只能靠 N7 或长按 KEY1
   *   ch9  当前任务是否在运行，0/1(TASK_RUN)
-  *   ch10 当前任务已耗时，秒(TASK_ELAPSED_S) —— 完成/停止后定格，
-  *        与 app.c 主界面秒表显示的是同一个数
+  *   ch10 当前任务计时，秒(TASK_ELAPSED_S) —— 通常在完成/停止后定格；
+  *        任务五/六通过 A 时立即掐表，与 app.c 主界面秒表显示的是同一个数
   *   ch11 电池电压 V(BATTERY_V)，见 battery.c 的一阶低通滤波值
   *
   * 用 snprintf 拼文本：CMakeLists.txt 里已经为 LCD_DisplayDecimals() 链了

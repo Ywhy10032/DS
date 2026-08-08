@@ -26,7 +26,7 @@ static Task_ID    s_task      = TASK_2;      /* 开机默认停在任务二 */
 static Task_State s_state     = TASK_STATE_IDLE;
 
 static uint32_t s_start_tick   = 0;
-static uint32_t s_elapsed_ms   = 0;          /* 完成/停止后定格 */
+static uint32_t s_elapsed_ms   = 0;          /* 评分计时；任务五/六过 A 后立即定格 */
 static int32_t  s_start_count  = 0;          /* 启动时的编码器基准 */
 static float    s_distance_m   = 0.0f;
 static float    s_ramp_rpm     = 0.0f;       /* 载球任务的速度斜坡当前值 */
@@ -265,7 +265,12 @@ static void Task_Start(void)
 
 static void Task_Finish(Task_State end_state)
 {
-  s_elapsed_ms = HAL_GetTick() - s_start_tick;
+  /* 任务五/六在通过 A 的瞬间已经掐表，后面的匀速滑行和缓停不计入成绩。
+     这里不能再用最终停车时刻覆盖；其他任务仍在结束时正常定格。 */
+  if (((s_task != TASK_5) && (s_task != TASK_6)) || !s_lap_done)
+  {
+    s_elapsed_ms = HAL_GetTick() - s_start_tick;
+  }
   s_state      = end_state;
 
   /* 任务一收尾：摆动停在哪儿就是哪儿，先把杆放回水平点再把球杆闭环还回去。
@@ -491,6 +496,7 @@ static void TaskBallLap_Run(void)
       s_lap_done    = 1;
       s_lap_done_ms = HAL_GetTick();
       s_split_ms    = s_elapsed_ms;  /* 通过 A 的时刻，评分看这个数(≤30s) */
+      s_elapsed_ms  = s_split_ms;    /* 正式掐表；滑行和缓停期间保持不变 */
     }
   }
 
@@ -516,7 +522,8 @@ static void TaskBallLap_Run(void)
   }
 
   /* ---------- 时间兜底 ---------- */
-  if (s_elapsed_ms >= TASK56_RUN_TIME_MS)
+  /* 过 A 后 s_elapsed_ms 已冻结，安全超时必须继续使用实际运行时长。 */
+  if ((HAL_GetTick() - s_start_tick) >= TASK56_RUN_TIME_MS)
   {
     Task_Finish(TASK_STATE_DONE);
   }
@@ -617,7 +624,11 @@ void Task_Update(void)
     return;
   }
 
-  s_elapsed_ms = HAL_GetTick() - s_start_tick;
+  /* 任务五/六通过 A 后继续平缓停车，但评分计时必须停在过线时刻。 */
+  if (!(((s_task == TASK_5) || (s_task == TASK_6)) && s_lap_done))
+  {
+    s_elapsed_ms = HAL_GetTick() - s_start_tick;
+  }
 
   switch (s_task)
   {

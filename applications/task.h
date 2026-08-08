@@ -661,7 +661,8 @@ uint8_t Task_UsesVehicle(void);
   */
 uint8_t Task_GetDriveTargets(float *left_rpm, float *right_rpm);
 
-/* 行驶总时间(ms)。运行中实时累加，完成或停止后定格 */
+/* 任务计时(ms)。通常在完成/停止时定格；任务五/六通过 A 时立即掐表，
+   后续匀速滑行和缓停不再计入该值 */
 uint32_t Task_GetElapsedMs(void);
 
 /**
